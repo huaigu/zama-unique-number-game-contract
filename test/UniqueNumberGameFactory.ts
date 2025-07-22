@@ -1,0 +1,414 @@
+import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { ethers, fhevm } from "hardhat";
+import { UniqueNumberGameFactory, UniqueNumberGameFactory__factory } from "../types";
+import { expect } from "chai";
+import { FhevmType } from "@fhevm/hardhat-plugin";
+import { time } from "@nomicfoundation/hardhat-network-helpers";
+
+type Signers = {
+  deployer: HardhatEthersSigner;
+  alice: HardhatEthersSigner;
+  bob: HardhatEthersSigner;
+  charlie: HardhatEthersSigner;
+};
+
+async function deployFixture() {
+  const factory = (await ethers.getContractFactory("UniqueNumberGameFactory")) as UniqueNumberGameFactory__factory;
+  const gameContract = (await factory.deploy()) as UniqueNumberGameFactory;
+  const gameContractAddress = await gameContract.getAddress();
+
+  return { gameContract, gameContractAddress };
+}
+
+describe("UniqueNumberGameFactory", function () {
+  let signers: Signers;
+  let gameContract: UniqueNumberGameFactory;
+  let gameContractAddress: string;
+
+  // 游戏参数
+  const minNumber = 1;
+  const maxNumber = 10;
+  const maxPlayers = 3;
+  const entryFee = ethers.parseEther("0.1");
+  const deadlineDuration = 3600; // 1 hour
+
+  before(async function () {
+    const ethSigners: HardhatEthersSigner[] = await ethers.getSigners();
+    signers = { 
+      deployer: ethSigners[0], 
+      alice: ethSigners[1], 
+      bob: ethSigners[2],
+      charlie: ethSigners[3]
+    };
+  });
+
+  beforeEach(async () => {
+    // Check whether the tests are running against an FHEVM mock environment
+    if (!fhevm.isMock) {
+      throw new Error(`This hardhat test suite cannot run on Sepolia Testnet`);
+    }
+    ({ gameContract, gameContractAddress } = await deployFixture());
+  });
+
+  describe("Game Creation", function () {
+    it("should create a new game with correct parameters", async function () {
+      const tx = await gameContract
+        .connect(signers.alice)
+        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+      await tx.wait();
+
+      const game = await gameContract.games(0);
+      expect(game.gameId).to.eq(0);
+      expect(game.creator).to.eq(signers.alice.address);
+      expect(game.status).to.eq(0); // GameStatus.Open
+      expect(game.minNumber).to.eq(minNumber);
+      expect(game.maxNumber).to.eq(maxNumber);
+      expect(game.maxPlayers).to.eq(maxPlayers);
+      expect(game.entryFee).to.eq(entryFee);
+      expect(game.playerCount).to.eq(0);
+    });
+
+    it("should reject invalid game parameters", async function () {
+      // Invalid number range
+      await expect(
+        gameContract.createGame(10, 5, maxPlayers, entryFee, deadlineDuration)
+      ).to.be.revertedWith("Invalid number range");
+
+      // Too few players
+      await expect(
+        gameContract.createGame(minNumber, maxNumber, 1, entryFee, deadlineDuration)
+      ).to.be.revertedWith("Max players must be at least 2");
+
+      // Range too large
+      await expect(
+        gameContract.createGame(1, 300, maxPlayers, entryFee, deadlineDuration)
+      ).to.be.revertedWith("Range is too large for efficient FHE");
+    });
+
+    it("should increment game counter for multiple games", async function () {
+      await gameContract.createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+      await gameContract.createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+      
+      expect(await gameContract.gameCounter()).to.eq(2);
+      
+      const game0 = await gameContract.games(0);
+      const game1 = await gameContract.games(1);
+      expect(game0.gameId).to.eq(0);
+      expect(game1.gameId).to.eq(1);
+    });
+  });
+
+  describe("Number Submission", function () {
+    beforeEach(async function () {
+      // Create a game before each test
+      await gameContract
+        .connect(signers.alice)
+        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+    });
+
+    it("should allow valid number submissions", async function () {
+      const gameId = 0;
+      const submittedNumber = 5;
+
+      // Encrypt the number
+      const encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(submittedNumber)
+        .encrypt();
+
+      const tx = await gameContract
+        .connect(signers.bob)
+        .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+          value: entryFee
+        });
+      await tx.wait();
+
+      const game = await gameContract.games(gameId);
+      expect(game.playerCount).to.eq(1);
+      expect(await gameContract.hasPlayerSubmitted(gameId, signers.bob.address)).to.be.true;
+      expect(await gameContract.gamePots(gameId)).to.eq(entryFee);
+    });
+
+    it("should reject submissions with incorrect entry fee", async function () {
+      const gameId = 0;
+      const submittedNumber = 5;
+
+      const encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(submittedNumber)
+        .encrypt();
+
+      await expect(
+        gameContract
+          .connect(signers.bob)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: ethers.parseEther("0.05") // Wrong fee
+          })
+      ).to.be.revertedWith("Incorrect entry fee");
+    });
+
+    it("should reject duplicate submissions from same player", async function () {
+      const gameId = 0;
+      const submittedNumber = 5;
+
+      const encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(submittedNumber)
+        .encrypt();
+
+      // First submission - should succeed
+      await gameContract
+        .connect(signers.bob)
+        .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+          value: entryFee
+        });
+
+      // Second submission - should fail
+      await expect(
+        gameContract
+          .connect(signers.bob)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: entryFee
+          })
+      ).to.be.revertedWith("Player has already submitted");
+    });
+
+    it("should reject submissions after deadline", async function () {
+      const gameId = 0;
+      const submittedNumber = 5;
+
+      // Fast forward time past deadline
+      await time.increase(deadlineDuration + 1);
+
+      const encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(submittedNumber)
+        .encrypt();
+
+      await expect(
+        gameContract
+          .connect(signers.bob)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: entryFee
+          })
+      ).to.be.revertedWith("Game has passed deadline");
+    });
+
+    it("should automatically trigger winner calculation when max players reached", async function () {
+      const gameId = 0;
+
+      // Submit numbers from 3 players (maxPlayers = 3)
+      for (let i = 0; i < maxPlayers; i++) {
+        const player = [signers.bob, signers.charlie, signers.deployer][i];
+        const submittedNumber = i + 1; // 1, 2, 3
+
+        const encryptedNumber = await fhevm
+          .createEncryptedInput(gameContractAddress, player.address)
+          .add32(submittedNumber)
+          .encrypt();
+
+        const tx = await gameContract
+          .connect(player)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: entryFee
+          });
+        await tx.wait();
+      }
+
+      const game = await gameContract.games(gameId);
+      expect(game.status).to.eq(1); // GameStatus.Calculating (在mock环境中回调不会被调用)
+      expect(game.playerCount).to.eq(maxPlayers);
+    });
+  });
+
+  describe("Winner Calculation", function () {
+    beforeEach(async function () {
+      await gameContract
+        .connect(signers.alice)
+        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+    });
+
+    it("should allow manual winner calculation after deadline", async function () {
+      const gameId = 0;
+
+      // Submit one number
+      const encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(5)
+        .encrypt();
+
+      await gameContract
+        .connect(signers.bob)
+        .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+          value: entryFee
+        });
+
+      // Fast forward past deadline
+      await time.increase(deadlineDuration + 1);
+
+      const tx = await gameContract
+        .connect(signers.charlie)
+        .findWinnerByDeadline(gameId);
+      await tx.wait();
+
+      const game = await gameContract.games(gameId);
+      expect(game.status).to.eq(1); // GameStatus.Calculating (在mock环境中回调不会被调用)
+    });
+
+    it("should reject manual calculation before deadline", async function () {
+      const gameId = 0;
+
+      await expect(
+        gameContract.findWinnerByDeadline(gameId)
+      ).to.be.revertedWith("Deadline has not passed yet");
+    });
+
+    it("should reject calculation if no players", async function () {
+      const gameId = 0;
+
+      // Fast forward past deadline without any submissions
+      await time.increase(deadlineDuration + 1);
+
+      await expect(
+        gameContract.findWinnerByDeadline(gameId)
+      ).to.be.revertedWith("No players in the game");
+    });
+  });
+
+  describe("Prize Distribution", function () {
+    it("should track prize pool correctly", async function () {
+      await gameContract
+        .connect(signers.alice)
+        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+
+      const gameId = 0;
+      const initialPot = await gameContract.gamePots(gameId);
+      expect(initialPot).to.eq(0);
+
+      // Submit numbers from 2 players
+      for (let i = 0; i < 2; i++) {
+        const player = [signers.bob, signers.charlie][i];
+        const submittedNumber = i + 1;
+
+        const encryptedNumber = await fhevm
+          .createEncryptedInput(gameContractAddress, player.address)
+          .add32(submittedNumber)
+          .encrypt();
+
+        await gameContract
+          .connect(player)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: entryFee
+          });
+      }
+
+      const finalPot = await gameContract.gamePots(gameId);
+      expect(finalPot).to.eq(entryFee * BigInt(2));
+    });
+  });
+
+  describe("Game State Management", function () {
+    it("should maintain correct game states", async function () {
+      await gameContract
+        .connect(signers.alice)
+        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+
+      const gameId = 0;
+      
+      // Initial state should be Open
+      let game = await gameContract.games(gameId);
+      expect(game.status).to.eq(0); // GameStatus.Open
+
+      // Submit numbers to trigger winner calculation
+      for (let i = 0; i < maxPlayers; i++) {
+        const player = [signers.bob, signers.charlie, signers.deployer][i];
+        const submittedNumber = i + 1;
+
+        const encryptedNumber = await fhevm
+          .createEncryptedInput(gameContractAddress, player.address)
+          .add32(submittedNumber)
+          .encrypt();
+
+        await gameContract
+          .connect(player)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: entryFee
+          });
+      }
+
+      // After max players, state should be Calculating (回调在mock中不会执行)
+      game = await gameContract.games(gameId);
+      expect(game.status).to.eq(1); // GameStatus.Calculating
+    });
+  });
+
+  describe("Events", function () {
+    it("should emit GameCreated event", async function () {
+      const currentTime = await time.latest();
+      await expect(
+        gameContract
+          .connect(signers.alice)
+          .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration)
+      )
+        .to.emit(gameContract, "GameCreated")
+        .withArgs(0, signers.alice.address, entryFee, maxPlayers, currentTime + deadlineDuration + 1);
+    });
+
+    it("should emit SubmissionReceived event", async function () {
+      await gameContract
+        .connect(signers.alice)
+        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+
+      const gameId = 0;
+      const encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(5)
+        .encrypt();
+
+      await expect(
+        gameContract
+          .connect(signers.bob)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: entryFee
+          })
+      )
+        .to.emit(gameContract, "SubmissionReceived")
+        .withArgs(gameId, signers.bob.address, 1);
+    });
+
+    it("should emit WinnerCalculationStarted event", async function () {
+      await gameContract
+        .connect(signers.alice)
+        .createGame(minNumber, maxNumber, 2, entryFee, deadlineDuration); // Only 2 players needed
+
+      const gameId = 0;
+
+      // Submit from first player
+      let encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(5)
+        .encrypt();
+
+      await gameContract
+        .connect(signers.bob)
+        .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+          value: entryFee
+        });
+
+      // Submit from second player - this should trigger winner calculation
+      encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.charlie.address)
+        .add32(7)
+        .encrypt();
+
+      await expect(
+        gameContract
+          .connect(signers.charlie)
+          .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+            value: entryFee
+          })
+      ).to.emit(gameContract, "WinnerCalculationStarted")
+        .withArgs(gameId, signers.charlie.address);
+    });
+  });
+});
