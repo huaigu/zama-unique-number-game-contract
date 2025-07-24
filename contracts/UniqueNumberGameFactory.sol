@@ -22,6 +22,7 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         uint256 gameId;
         address creator;
         GameStatus status;
+        string roomName;
         // 游戏规则
         uint32 minNumber;
         uint32 maxNumber;
@@ -33,6 +34,40 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         // FHE 计算结果
         euint32 encryptedWinner;
         uint32 decryptedWinner;
+    }
+
+    // GameSummary结构体，用于提供游戏的摘要信息
+    struct GameSummary {
+        uint256 gameId;
+        string roomName;
+        address creator;
+        GameStatus status;
+        uint32 playerCount;
+        uint32 maxPlayers;
+        uint32 minNumber;
+        uint32 maxNumber;
+        uint256 entryFee;
+        uint256 deadline;
+        uint256 prizePool;
+        address winner;
+        uint32 winningNumber;
+    }
+
+    // 玩家统计结构体
+    struct PlayerStats {
+        uint256 gamesPlayed;
+        uint256 gamesWon;
+        uint256 totalWinnings;
+    }
+
+    // 获胜记录结构体
+    struct WinnerRecord {
+        uint256 gameId;
+        string roomName;
+        address winner;
+        uint32 winningNumber;
+        uint256 prize;
+        uint256 timestamp;
     }
 
     // --- 状态变量 ---
@@ -55,12 +90,15 @@ contract UniqueNumberGameFactory is SepoliaConfig {
     mapping(uint256 => address) public gameWinners;
     // requestId => gameId (用于回调函数识别游戏)
     mapping(uint256 => uint256) private requestToGameId;
+    // 获胜历史记录数组
+    WinnerRecord[] public winnerHistory;
 
     // --- 事件 ---
 
     event GameCreated(
         uint256 indexed gameId,
         address indexed creator,
+        string roomName,
         uint256 entryFee,
         uint32 maxPlayers,
         uint256 deadline
@@ -74,6 +112,7 @@ contract UniqueNumberGameFactory is SepoliaConfig {
 
     /**
      * @notice 创建一局新游戏
+     * @param _roomName 房间名字
      * @param _minNumber 数字范围下限
      * @param _maxNumber 数字范围上限
      * @param _maxPlayers 最大参与人数
@@ -81,12 +120,14 @@ contract UniqueNumberGameFactory is SepoliaConfig {
      * @param _deadlineDuration 游戏持续时间 (in seconds from now)
      */
     function createGame(
+        string calldata _roomName,
         uint32 _minNumber,
         uint32 _maxNumber,
         uint32 _maxPlayers,
         uint256 _entryFee,
         uint256 _deadlineDuration
     ) public {
+        require(bytes(_roomName).length > 0 && bytes(_roomName).length <= 64, "Invalid room name length");
         require(_minNumber > 0 && _maxNumber > _minNumber, "Invalid number range");
         require(_maxPlayers > 1, "Max players must be at least 2");
         require(_maxNumber - _minNumber < 256, "Range is too large for efficient FHE"); // Gas 限制
@@ -98,6 +139,7 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         newGame.gameId = gameId;
         newGame.creator = msg.sender;
         newGame.status = GameStatus.Open;
+        newGame.roomName = _roomName;
         newGame.minNumber = _minNumber;
         newGame.maxNumber = _maxNumber;
         newGame.maxPlayers = _maxPlayers;
@@ -112,7 +154,7 @@ contract UniqueNumberGameFactory is SepoliaConfig {
             FHE.allowThis(gameCounts[gameId][i]); // 允许合约访问计数器
         }
 
-        emit GameCreated(gameId, msg.sender, _entryFee, _maxPlayers, newGame.deadline);
+        emit GameCreated(gameId, msg.sender, _roomName, _entryFee, _maxPlayers, newGame.deadline);
     }
 
     /**
@@ -297,6 +339,17 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         if (decryptedWinnerIndex < game.playerCount) {
             address winnerAddress = gamePlayerAddresses[gameId][decryptedWinnerIndex];
             gameWinners[gameId] = winnerAddress;
+            
+            // 记录获胜历史
+            winnerHistory.push(WinnerRecord({
+                gameId: gameId,
+                roomName: game.roomName,
+                winner: winnerAddress,
+                winningNumber: game.decryptedWinner,
+                prize: gamePots[gameId],
+                timestamp: block.timestamp
+            }));
+            
             emit WinnerDetermined(gameId, game.decryptedWinner, winnerAddress);
         }
         game.status = GameStatus.Finished;
@@ -324,5 +377,314 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         require(success, "Failed to send prize");
 
         emit PrizeClaimed(_gameId, msg.sender, prize);
+    }
+
+    // --- View 函数 ---
+
+    /**
+     * @notice 获取所有游戏列表
+     * @return games 所有游戏的数组
+     */
+    function getAllGames() external view returns (Game[] memory) {
+        Game[] memory allGames = new Game[](gameCounter);
+        for (uint256 i = 0; i < gameCounter; i++) {
+            allGames[i] = games[i];
+        }
+        return allGames;
+    }
+
+    /**
+     * @notice 获取活跃游戏列表（状态为Open）
+     * @return activeGames 活跃游戏的数组
+     */
+    function getActiveGames() external view returns (Game[] memory) {
+        // 首先计算活跃游戏数量
+        uint256 activeCount = 0;
+        for (uint256 i = 0; i < gameCounter; i++) {
+            if (games[i].status == GameStatus.Open) {
+                activeCount++;
+            }
+        }
+
+        // 创建数组并填充活跃游戏
+        Game[] memory activeGames = new Game[](activeCount);
+        uint256 currentIndex = 0;
+        for (uint256 i = 0; i < gameCounter; i++) {
+            if (games[i].status == GameStatus.Open) {
+                activeGames[currentIndex] = games[i];
+                currentIndex++;
+            }
+        }
+        return activeGames;
+    }
+
+    /**
+     * @notice 根据状态获取游戏列表
+     * @param status 游戏状态
+     * @return gamesByStatus 指定状态的游戏数组
+     */
+    function getGamesByStatus(GameStatus status) external view returns (Game[] memory) {
+        // 首先计算指定状态的游戏数量
+        uint256 statusCount = 0;
+        for (uint256 i = 0; i < gameCounter; i++) {
+            if (games[i].status == status) {
+                statusCount++;
+            }
+        }
+
+        // 创建数组并填充指定状态的游戏
+        Game[] memory gamesByStatus = new Game[](statusCount);
+        uint256 currentIndex = 0;
+        for (uint256 i = 0; i < gameCounter; i++) {
+            if (games[i].status == status) {
+                gamesByStatus[currentIndex] = games[i];
+                currentIndex++;
+            }
+        }
+        return gamesByStatus;
+    }
+
+    /**
+     * @notice 分页获取游戏列表
+     * @param offset 偏移量
+     * @param limit 限制数量
+     * @return paginatedGames 分页的游戏数组
+     */
+    function getGamesWithPagination(uint256 offset, uint256 limit) external view returns (Game[] memory) {
+        require(offset < gameCounter, "Offset exceeds game count");
+        
+        uint256 end = offset + limit;
+        if (end > gameCounter) {
+            end = gameCounter;
+        }
+        
+        uint256 resultLength = end - offset;
+        Game[] memory paginatedGames = new Game[](resultLength);
+        
+        for (uint256 i = 0; i < resultLength; i++) {
+            paginatedGames[i] = games[offset + i];
+        }
+        
+        return paginatedGames;
+    }
+
+    /**
+     * @notice 获取游戏的摘要信息
+     * @param gameId 游戏ID
+     * @return summary 游戏摘要信息
+     */
+    function getGameSummary(uint256 gameId) external view returns (GameSummary memory) {
+        require(gameId < gameCounter, "Game does not exist");
+        
+        Game storage game = games[gameId];
+        
+        return GameSummary({
+            gameId: game.gameId,
+            roomName: game.roomName,
+            creator: game.creator,
+            status: game.status,
+            playerCount: game.playerCount,
+            maxPlayers: game.maxPlayers,
+            minNumber: game.minNumber,
+            maxNumber: game.maxNumber,
+            entryFee: game.entryFee,
+            deadline: game.deadline,
+            prizePool: gamePots[gameId],
+            winner: gameWinners[gameId],
+            winningNumber: game.decryptedWinner
+        });
+    }
+
+    /**
+     * @notice 获取玩家参与的游戏ID列表
+     * @param player 玩家地址
+     * @return gameIds 玩家参与的游戏ID数组
+     */
+    function getPlayerGames(address player) external view returns (uint256[] memory) {
+        // 首先计算玩家参与的游戏数量
+        uint256 playerGameCount = 0;
+        for (uint256 i = 0; i < gameCounter; i++) {
+            if (hasPlayerSubmitted[i][player]) {
+                playerGameCount++;
+            }
+        }
+
+        // 创建数组并填充玩家参与的游戏ID
+        uint256[] memory playerGames = new uint256[](playerGameCount);
+        uint256 currentIndex = 0;
+        for (uint256 i = 0; i < gameCounter; i++) {
+            if (hasPlayerSubmitted[i][player]) {
+                playerGames[currentIndex] = i;
+                currentIndex++;
+            }
+        }
+        
+        return playerGames;
+    }
+
+    /**
+     * @notice 获取游戏总数
+     * @return count 总游戏数量
+     */
+    function getTotalGamesCount() external view returns (uint256) {
+        return gameCounter;
+    }
+
+    /**
+     * @notice 检查游戏是否可以开始开奖
+     * @param gameId 游戏ID
+     * @return canFinalize 是否可以开奖
+     */
+    function canFinalizeGame(uint256 gameId) external view returns (bool) {
+        require(gameId < gameCounter, "Game does not exist");
+        
+        Game storage game = games[gameId];
+        
+        if (game.status != GameStatus.Open) {
+            return false;
+        }
+        
+        // 达到最大人数或者过了截止时间且有参与者
+        return (game.playerCount == game.maxPlayers) || 
+               (block.timestamp >= game.deadline && game.playerCount > 0);
+    }
+
+    /**
+     * @notice 获取玩家统计信息
+     * @param player 玩家地址
+     * @return stats 玩家统计信息
+     */
+    function getPlayerStats(address player) external view returns (PlayerStats memory) {
+        uint256 gamesPlayed = 0;
+        uint256 gamesWon = 0;
+        uint256 totalWinnings = 0;
+
+        // 计算参与的游戏数量
+        for (uint256 i = 0; i < gameCounter; i++) {
+            if (hasPlayerSubmitted[i][player]) {
+                gamesPlayed++;
+            }
+        }
+
+        // 从获胜历史中计算获胜次数和总奖金
+        for (uint256 i = 0; i < winnerHistory.length; i++) {
+            if (winnerHistory[i].winner == player) {
+                gamesWon++;
+                totalWinnings += winnerHistory[i].prize;
+            }
+        }
+
+        return PlayerStats({
+            gamesPlayed: gamesPlayed,
+            gamesWon: gamesWon,
+            totalWinnings: totalWinnings
+        });
+    }
+
+    /**
+     * @notice 获取获胜历史记录
+     * @param limit 限制返回数量，0表示返回全部
+     * @return records 获胜记录数组
+     */
+    function getWinnerHistory(uint256 limit) external view returns (WinnerRecord[] memory) {
+        uint256 historyLength = winnerHistory.length;
+        uint256 returnLength = (limit == 0 || limit > historyLength) ? historyLength : limit;
+        
+        WinnerRecord[] memory records = new WinnerRecord[](returnLength);
+        
+        // 返回最新的记录（倒序）
+        for (uint256 i = 0; i < returnLength; i++) {
+            records[i] = winnerHistory[historyLength - 1 - i];
+        }
+        
+        return records;
+    }
+
+    /**
+     * @notice 获取获胜历史记录总数
+     * @return count 获胜记录总数
+     */
+    function getWinnerHistoryCount() external view returns (uint256) {
+        return winnerHistory.length;
+    }
+
+    /**
+     * @notice 获取排行榜（按获胜次数排序的玩家列表）
+     * @param limit 返回的玩家数量限制
+     * @return topPlayers 排行榜玩家地址数组
+     * @return winCounts 对应的获胜次数数组
+     * @return totalWinnings 对应的总奖金数组
+     */
+    function getLeaderboard(uint256 limit) external view returns (
+        address[] memory topPlayers,
+        uint256[] memory winCounts,
+        uint256[] memory totalWinnings
+    ) {
+        // 收集所有独特的获胜者
+        address[] memory uniqueWinners = new address[](winnerHistory.length);
+        uint256[] memory winnerCounts = new uint256[](winnerHistory.length);
+        uint256[] memory winnerEarnings = new uint256[](winnerHistory.length);
+        uint256 uniqueCount = 0;
+
+        for (uint256 i = 0; i < winnerHistory.length; i++) {
+            address winner = winnerHistory[i].winner;
+            bool found = false;
+            uint256 foundIndex = 0;
+
+            // 检查是否已经记录过这个获胜者
+            for (uint256 j = 0; j < uniqueCount; j++) {
+                if (uniqueWinners[j] == winner) {
+                    found = true;
+                    foundIndex = j;
+                    break;
+                }
+            }
+
+            if (found) {
+                winnerCounts[foundIndex]++;
+                winnerEarnings[foundIndex] += winnerHistory[i].prize;
+            } else {
+                uniqueWinners[uniqueCount] = winner;
+                winnerCounts[uniqueCount] = 1;
+                winnerEarnings[uniqueCount] = winnerHistory[i].prize;
+                uniqueCount++;
+            }
+        }
+
+        // 确定返回数量
+        uint256 returnCount = (limit == 0 || limit > uniqueCount) ? uniqueCount : limit;
+        
+        topPlayers = new address[](returnCount);
+        winCounts = new uint256[](returnCount);
+        totalWinnings = new uint256[](returnCount);
+
+        // 简单的冒泡排序（按获胜次数降序）
+        for (uint256 i = 0; i < uniqueCount; i++) {
+            for (uint256 j = i + 1; j < uniqueCount; j++) {
+                if (winnerCounts[i] < winnerCounts[j]) {
+                    // 交换位置
+                    address tempAddress = uniqueWinners[i];
+                    uniqueWinners[i] = uniqueWinners[j];
+                    uniqueWinners[j] = tempAddress;
+                    
+                    uint256 tempCount = winnerCounts[i];
+                    winnerCounts[i] = winnerCounts[j];
+                    winnerCounts[j] = tempCount;
+                    
+                    uint256 tempEarnings = winnerEarnings[i];
+                    winnerEarnings[i] = winnerEarnings[j];
+                    winnerEarnings[j] = tempEarnings;
+                }
+            }
+        }
+
+        // 复制到返回数组
+        for (uint256 i = 0; i < returnCount; i++) {
+            topPlayers[i] = uniqueWinners[i];
+            winCounts[i] = winnerCounts[i];
+            totalWinnings[i] = winnerEarnings[i];
+        }
+
+        return (topPlayers, winCounts, totalWinnings);
     }
 }

@@ -26,6 +26,7 @@ describe("UniqueNumberGameFactory", function () {
   let gameContractAddress: string;
 
   // 游戏参数
+  const roomName = "Test Game Room";
   const minNumber = 1;
   const maxNumber = 10;
   const maxPlayers = 3;
@@ -54,13 +55,14 @@ describe("UniqueNumberGameFactory", function () {
     it("should create a new game with correct parameters", async function () {
       const tx = await gameContract
         .connect(signers.alice)
-        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+        .createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
       await tx.wait();
 
       const game = await gameContract.games(0);
       expect(game.gameId).to.eq(0);
       expect(game.creator).to.eq(signers.alice.address);
       expect(game.status).to.eq(0); // GameStatus.Open
+      expect(game.roomName).to.eq(roomName);
       expect(game.minNumber).to.eq(minNumber);
       expect(game.maxNumber).to.eq(maxNumber);
       expect(game.maxPlayers).to.eq(maxPlayers);
@@ -69,32 +71,45 @@ describe("UniqueNumberGameFactory", function () {
     });
 
     it("should reject invalid game parameters", async function () {
+      // Invalid room name length
+      await expect(
+        gameContract.createGame("", minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration)
+      ).to.be.revertedWith("Invalid room name length");
+
+      // Room name too long
+      const longRoomName = "a".repeat(65);
+      await expect(
+        gameContract.createGame(longRoomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration)
+      ).to.be.revertedWith("Invalid room name length");
+
       // Invalid number range
       await expect(
-        gameContract.createGame(10, 5, maxPlayers, entryFee, deadlineDuration)
+        gameContract.createGame(roomName, 10, 5, maxPlayers, entryFee, deadlineDuration)
       ).to.be.revertedWith("Invalid number range");
 
       // Too few players
       await expect(
-        gameContract.createGame(minNumber, maxNumber, 1, entryFee, deadlineDuration)
+        gameContract.createGame(roomName, minNumber, maxNumber, 1, entryFee, deadlineDuration)
       ).to.be.revertedWith("Max players must be at least 2");
 
       // Range too large
       await expect(
-        gameContract.createGame(1, 300, maxPlayers, entryFee, deadlineDuration)
+        gameContract.createGame(roomName, 1, 300, maxPlayers, entryFee, deadlineDuration)
       ).to.be.revertedWith("Range is too large for efficient FHE");
     });
 
     it("should increment game counter for multiple games", async function () {
-      await gameContract.createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
-      await gameContract.createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+      await gameContract.createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+      await gameContract.createGame("Second Room", minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
       
       expect(await gameContract.gameCounter()).to.eq(2);
       
       const game0 = await gameContract.games(0);
       const game1 = await gameContract.games(1);
       expect(game0.gameId).to.eq(0);
+      expect(game0.roomName).to.eq(roomName);
       expect(game1.gameId).to.eq(1);
+      expect(game1.roomName).to.eq("Second Room");
     });
   });
 
@@ -103,7 +118,7 @@ describe("UniqueNumberGameFactory", function () {
       // Create a game before each test
       await gameContract
         .connect(signers.alice)
-        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+        .createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
     });
 
     it("should allow valid number submissions", async function () {
@@ -225,7 +240,7 @@ describe("UniqueNumberGameFactory", function () {
     beforeEach(async function () {
       await gameContract
         .connect(signers.alice)
-        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+        .createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
     });
 
     it("should allow manual winner calculation after deadline", async function () {
@@ -279,7 +294,7 @@ describe("UniqueNumberGameFactory", function () {
     it("should track prize pool correctly", async function () {
       await gameContract
         .connect(signers.alice)
-        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+        .createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
 
       const gameId = 0;
       const initialPot = await gameContract.gamePots(gameId);
@@ -311,7 +326,7 @@ describe("UniqueNumberGameFactory", function () {
     it("should maintain correct game states", async function () {
       await gameContract
         .connect(signers.alice)
-        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+        .createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
 
       const gameId = 0;
       
@@ -348,16 +363,16 @@ describe("UniqueNumberGameFactory", function () {
       await expect(
         gameContract
           .connect(signers.alice)
-          .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration)
+          .createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration)
       )
         .to.emit(gameContract, "GameCreated")
-        .withArgs(0, signers.alice.address, entryFee, maxPlayers, currentTime + deadlineDuration + 1);
+        .withArgs(0, signers.alice.address, roomName, entryFee, maxPlayers, currentTime + deadlineDuration + 1);
     });
 
     it("should emit SubmissionReceived event", async function () {
       await gameContract
         .connect(signers.alice)
-        .createGame(minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+        .createGame(roomName, minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
 
       const gameId = 0;
       const encryptedNumber = await fhevm
@@ -379,7 +394,7 @@ describe("UniqueNumberGameFactory", function () {
     it("should emit WinnerCalculationStarted event", async function () {
       await gameContract
         .connect(signers.alice)
-        .createGame(minNumber, maxNumber, 2, entryFee, deadlineDuration); // Only 2 players needed
+        .createGame(roomName, minNumber, maxNumber, 2, entryFee, deadlineDuration); // Only 2 players needed
 
       const gameId = 0;
 
@@ -409,6 +424,141 @@ describe("UniqueNumberGameFactory", function () {
           })
       ).to.emit(gameContract, "WinnerCalculationStarted")
         .withArgs(gameId, signers.charlie.address);
+    });
+  });
+
+  describe("View Functions", function () {
+    beforeEach(async function () {
+      // Create multiple games for testing
+      await gameContract
+        .connect(signers.alice)
+        .createGame("Room A", minNumber, maxNumber, maxPlayers, entryFee, deadlineDuration);
+      
+      await gameContract
+        .connect(signers.bob)
+        .createGame("Room B", minNumber, maxNumber, 2, entryFee, deadlineDuration);
+    });
+
+    it("should return all games", async function () {
+      const allGames = await gameContract.getAllGames();
+      expect(allGames.length).to.eq(2);
+      expect(allGames[0].roomName).to.eq("Room A");
+      expect(allGames[1].roomName).to.eq("Room B");
+    });
+
+    it("should return active games only", async function () {
+      const activeGames = await gameContract.getActiveGames();
+      expect(activeGames.length).to.eq(2);
+      expect(activeGames[0].status).to.eq(0); // GameStatus.Open
+      expect(activeGames[1].status).to.eq(0); // GameStatus.Open
+    });
+
+    it("should return games by status", async function () {
+      const openGames = await gameContract.getGamesByStatus(0); // GameStatus.Open
+      expect(openGames.length).to.eq(2);
+
+      const calculatingGames = await gameContract.getGamesByStatus(1); // GameStatus.Calculating
+      expect(calculatingGames.length).to.eq(0);
+    });
+
+    it("should return games with pagination", async function () {
+      const firstPage = await gameContract.getGamesWithPagination(0, 1);
+      expect(firstPage.length).to.eq(1);
+      expect(firstPage[0].roomName).to.eq("Room A");
+
+      const secondPage = await gameContract.getGamesWithPagination(1, 1);
+      expect(secondPage.length).to.eq(1);
+      expect(secondPage[0].roomName).to.eq("Room B");
+    });
+
+    it("should return correct game summary", async function () {
+      const gameId = 0;
+      const summary = await gameContract.getGameSummary(gameId);
+      
+      expect(summary.gameId).to.eq(gameId);
+      expect(summary.roomName).to.eq("Room A");
+      expect(summary.creator).to.eq(signers.alice.address);
+      expect(summary.status).to.eq(0); // GameStatus.Open
+      expect(summary.playerCount).to.eq(0);
+      expect(summary.maxPlayers).to.eq(maxPlayers);
+      expect(summary.minNumber).to.eq(minNumber);
+      expect(summary.maxNumber).to.eq(maxNumber);
+      expect(summary.entryFee).to.eq(entryFee);
+      expect(summary.prizePool).to.eq(0);
+      expect(summary.winner).to.eq(ethers.ZeroAddress);
+      expect(summary.winningNumber).to.eq(0);
+    });
+
+    it("should reject getGameSummary for non-existent game", async function () {
+      await expect(gameContract.getGameSummary(999))
+        .to.be.revertedWith("Game does not exist");
+    });
+
+    it("should return correct total games count", async function () {
+      const totalCount = await gameContract.getTotalGamesCount();
+      expect(totalCount).to.eq(2);
+    });
+
+    it("should return empty player games for new player", async function () {
+      const playerGames = await gameContract.getPlayerGames(signers.charlie.address);
+      expect(playerGames.length).to.eq(0);
+    });
+
+    it("should return correct canFinalizeGame status", async function () {
+      const gameId = 0;
+      
+      // Should not be finalizable initially
+      let canFinalize = await gameContract.canFinalizeGame(gameId);
+      expect(canFinalize).to.be.false;
+
+      // Add a player first (before deadline)
+      const encryptedNumber = await fhevm
+        .createEncryptedInput(gameContractAddress, signers.bob.address)
+        .add32(5)
+        .encrypt();
+
+      await gameContract
+        .connect(signers.bob)
+        .submitNumber(gameId, encryptedNumber.handles[0], encryptedNumber.inputProof, {
+          value: entryFee
+        });
+
+      // Still should not be finalizable (has players but deadline not passed)
+      canFinalize = await gameContract.canFinalizeGame(gameId);
+      expect(canFinalize).to.be.false;
+
+      // Fast forward past deadline
+      await time.increase(deadlineDuration + 1);
+
+      // Now should be finalizable (has players and deadline passed)
+      canFinalize = await gameContract.canFinalizeGame(gameId);
+      expect(canFinalize).to.be.true;
+    });
+  });
+
+  describe("Player Stats and Leaderboard", function () {
+    it("should return empty player stats for new player", async function () {
+      const stats = await gameContract.getPlayerStats(signers.alice.address);
+      expect(stats.gamesPlayed).to.eq(0);
+      expect(stats.gamesWon).to.eq(0);
+      expect(stats.totalWinnings).to.eq(0);
+    });
+
+    it("should return empty winner history initially", async function () {
+      const history = await gameContract.getWinnerHistory(10);
+      expect(history.length).to.eq(0);
+    });
+
+    it("should return zero winner history count initially", async function () {
+      const count = await gameContract.getWinnerHistoryCount();
+      expect(count).to.eq(0);
+    });
+
+    it("should return empty leaderboard initially", async function () {
+      const leaderboard = await gameContract.getLeaderboard(10);
+      expect(leaderboard.topPlayers.length).to.eq(0);
+      expect(leaderboard.winCounts.length).to.eq(0);
+      expect(leaderboard.totalWinnings.length).to.eq(0);
     });
   });
 });
