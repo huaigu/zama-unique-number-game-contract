@@ -123,6 +123,8 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     // 平局退款相关
     // gameId => player => has claimed refund
     mapping(uint256 => mapping(address => bool)) public hasClaimedRefund;
+    // gameId => player => has claimed prize
+    mapping(uint256 => mapping(address => bool)) public hasPlayerClaimed;
     // 平台费累积
     uint256 public platformFees;
     // 退款比例 (90% = 9000 / 10000)
@@ -430,6 +432,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
 
         gamePots[_gameId] = 0; // 防止重入攻击
         game.status = GameStatus.PrizeClaimed;
+        hasPlayerClaimed[_gameId][msg.sender] = true;
 
         (bool success, ) = msg.sender.call{value: prize}("");
         require(success, "Failed to send prize");

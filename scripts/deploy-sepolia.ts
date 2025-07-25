@@ -20,14 +20,13 @@ async function main() {
   console.log("\nDeploying UniqueNumberGameFactory contract...");
   const GameFactory = (await ethers.getContractFactory("UniqueNumberGameFactory")) as UniqueNumberGameFactory__factory;
   
-  // Estimate gas
-  const deploymentTx = GameFactory.getDeployTransaction();
-  const estimatedGas = await ethers.provider.estimateGas(deploymentTx);
-  console.log("Estimated gas for deployment:", estimatedGas.toString());
+  // Use fixed high gas limit for FHE contracts
+  const gasLimit = BigInt(5000000); // 5M gas should be enough
+  console.log("Using gas limit:", gasLimit.toString());
   
-  // Deploy with some extra gas
+  // Deploy with fixed gas limit
   const gameFactory = await GameFactory.deploy({
-    gasLimit: estimatedGas + BigInt(50000), // Add 50k gas buffer
+    gasLimit: gasLimit,
   });
   
   console.log("Transaction hash:", gameFactory.deploymentTransaction()?.hash);
