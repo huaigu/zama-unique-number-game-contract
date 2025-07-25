@@ -4,12 +4,39 @@ pragma solidity ^0.8.20;
 import {FHE, euint32, externalEuint32, ebool} from "@fhevm/solidity/lib/FHE.sol";
 import {SepoliaConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
 
+// 简单的 Owner 管理
+abstract contract Ownable {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() {
+        _owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(owner() == msg.sender, "Ownable: caller is not the owner");
+        _;
+    }
+
+    function transferOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
 /**
  * @title UniqueNumberGameFactory
  * @author Gemini AI based on Zama FHE
  * @notice 一个功能完备的最小唯一数字游戏平台，支持创建多局游戏、自定义规则和费用。
  */
-contract UniqueNumberGameFactory is SepoliaConfig {
+contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     // --- 数据结构 ---
     enum GameStatus {
         Open,
@@ -92,6 +119,15 @@ contract UniqueNumberGameFactory is SepoliaConfig {
     mapping(uint256 => uint256) private requestToGameId;
     // 获胜历史记录数组
     WinnerRecord[] public winnerHistory;
+    
+    // 平局退款相关
+    // gameId => player => has claimed refund
+    mapping(uint256 => mapping(address => bool)) public hasClaimedRefund;
+    // 平台费累积
+    uint256 public platformFees;
+    // 退款比例 (90% = 9000 / 10000)
+    uint256 public constant REFUND_PERCENTAGE = 9000;
+    uint256 public constant PERCENTAGE_BASE = 10000;
 
     // --- 事件 ---
 
@@ -107,6 +143,9 @@ contract UniqueNumberGameFactory is SepoliaConfig {
     event WinnerCalculationStarted(uint256 indexed gameId, address indexed trigger);
     event WinnerDetermined(uint256 indexed gameId, uint32 winnerNumber, address indexed winnerAddress);
     event PrizeClaimed(uint256 indexed gameId, address indexed winner, uint256 amount);
+    event NoWinnerDetermined(uint256 indexed gameId, uint256 totalRefundPool);
+    event RefundClaimed(uint256 indexed gameId, address indexed player, uint256 amount);
+    event PlatformFeesWithdrawn(address indexed owner, uint256 amount);
 
     // --- 核心函数 ---
 
@@ -226,47 +265,34 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         emit WinnerCalculationStarted(_gameId, msg.sender);
 
         Game storage game = games[_gameId];
-        euint32 encryptedWinnerNumber = game.encryptedWinner; // Start with the initial large value
-
-        for (uint32 i = game.minNumber; i <= game.maxNumber; i++) {
-            euint32 one = FHE.asEuint32(1);
-            euint32 currentNumber = FHE.asEuint32(i);
-            FHE.allowThis(one);
-            FHE.allowThis(currentNumber);
-            
-            ebool isUnique = FHE.eq(gameCounts[_gameId][i], one);
-            ebool isSmaller = FHE.lt(currentNumber, encryptedWinnerNumber);
-            ebool isNewWinner = FHE.and(isUnique, isSmaller);
-            
-            encryptedWinnerNumber = FHE.select(isNewWinner, currentNumber, encryptedWinnerNumber);
-            FHE.allowThis(encryptedWinnerNumber);
+        
+        // 🎯 新优化逻辑：直接解密所有玩家提交的数字
+        // 批量解密所有玩家提交的数字，然后在明文中计算获胜者
+        bytes32[] memory allSubmissions = new bytes32[](game.playerCount);
+        for (uint32 i = 0; i < game.playerCount; i++) {
+            allSubmissions[i] = FHE.toBytes32(gameEncryptedSubmissions[_gameId][i]);
         }
-        game.encryptedWinner = encryptedWinnerNumber;
-        FHE.allowThis(game.encryptedWinner); // 允许合约解密
-
-        // 步骤1: 请求解密获胜数字
-        bytes32[] memory cypherTexts = new bytes32[](1);
-        cypherTexts[0] = FHE.toBytes32(game.encryptedWinner);
         
         // 生成解密请求ID并保存对应的游戏ID
-        uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, _gameId, cypherTexts[0])));
+        uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, _gameId, "allSubmissions")));
         requestToGameId[requestId] = _gameId;
         
+        // 一次性解密所有提交的数字
         FHE.requestDecryption(
-            cypherTexts,
-            this.callbackDecryptWinnerNumber.selector
+            allSubmissions,
+            this.callbackDecryptAllSubmissions.selector
         );
     }
 
     /**
-     * @notice [回调函数1] 设置解密后的获胜数字，并立即启动第2步FHE计算来寻找获胜者索引
+     * @notice [新优化回调函数] 处理所有玩家提交数字的解密结果，直接计算获胜者
      * @param requestId 解密请求ID
-     * @param decryptedWinnerNumber 解密后的获胜数字
+     * @param decryptedNumbers 解密后的所有玩家提交数字数组
      * @param signatures 验证签名
      */
-    function callbackDecryptWinnerNumber(
+    function callbackDecryptAllSubmissions(
         uint256 requestId,
-        uint32 decryptedWinnerNumber,
+        uint32[] memory decryptedNumbers,
         bytes[] memory signatures
     ) public {
         // 验证签名防止未授权解密
@@ -277,67 +303,68 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         require(gameId > 0 || gameId == 0, "Invalid request ID");
         
         Game storage game = games[gameId];
-        game.decryptedWinner = decryptedWinnerNumber;
-
-        // 如果获胜数字是初始大数，说明没有唯一获胜者，游戏结束
-        if (decryptedWinnerNumber > game.maxNumber) {
-            game.status = GameStatus.Finished; // No winner
-            return;
-        }
-
-        // 步骤2: 启动FHE计算，找出获胜者在参与列表中的索引
-        euint32 encryptedWinnerIndex = FHE.asEuint32(type(uint32).max); // 无效索引
-        euint32 winnerNumberAsEuint = FHE.asEuint32(decryptedWinnerNumber);
-        FHE.allowThis(encryptedWinnerIndex);
-        FHE.allowThis(winnerNumberAsEuint);
-
-        for (uint32 i = 0; i < game.playerCount; i++) {
-            euint32 currentIndex = FHE.asEuint32(i);
-            FHE.allowThis(currentIndex);
+        
+        // 清理请求ID映射
+        delete requestToGameId[requestId];
+        
+        // 游戏结束
+        game.status = GameStatus.Finished;
+        
+        // 🎯 核心逻辑：在明文数组中找到唯一最小值
+        address winnerAddress = address(0);
+        uint32 winningNumber = 0;
+        
+        // 统计每个数字的出现次数和找唯一数字
+        uint32[] memory uniqueNumbers = new uint32[](decryptedNumbers.length);
+        uint32 uniqueCount = 0;
+        
+        // 第一步：统计频次并找到唯一数字
+        bool[] memory processed = new bool[](decryptedNumbers.length);
+        for (uint32 i = 0; i < decryptedNumbers.length; i++) {
+            if (processed[i]) continue;
             
-            ebool isMatch = FHE.eq(gameEncryptedSubmissions[gameId][i], winnerNumberAsEuint);
-            encryptedWinnerIndex = FHE.select(isMatch, currentIndex, encryptedWinnerIndex);
-            FHE.allowThis(encryptedWinnerIndex);
+            uint32 currentNumber = decryptedNumbers[i];
+            uint32 count = 0;
+            
+            // 计算当前数字出现次数
+            for (uint32 j = 0; j < decryptedNumbers.length; j++) {
+                if (decryptedNumbers[j] == currentNumber) {
+                    count++;
+                    processed[j] = true;
+                }
+            }
+            
+            // 如果是唯一数字（出现次数为1），记录下来
+            if (count == 1) {
+                uniqueNumbers[uniqueCount] = currentNumber;
+                uniqueCount++;
+            }
         }
-
-        // 允许合约解密获胜者索引
-        FHE.allowThis(encryptedWinnerIndex);
-
-        // 步骤2: 请求解密获胜者索引
-        bytes32[] memory indexCypherTexts = new bytes32[](1);
-        indexCypherTexts[0] = FHE.toBytes32(encryptedWinnerIndex);
         
-        // 生成新的请求ID
-        uint256 indexRequestId = uint256(keccak256(abi.encodePacked(block.timestamp + 1, gameId, indexCypherTexts[0])));
-        requestToGameId[indexRequestId] = gameId;
+        // 第二步：在唯一数字中找到最小值
+        if (uniqueCount > 0) {
+            uint32 minUniqueNumber = uniqueNumbers[0];
+            for (uint32 i = 1; i < uniqueCount; i++) {
+                if (uniqueNumbers[i] < minUniqueNumber) {
+                    minUniqueNumber = uniqueNumbers[i];
+                }
+            }
+            
+            // 第三步：找到提交最小唯一数字的玩家
+            for (uint32 i = 0; i < decryptedNumbers.length; i++) {
+                if (decryptedNumbers[i] == minUniqueNumber) {
+                    winnerAddress = gamePlayerAddresses[gameId][i];
+                    winningNumber = minUniqueNumber;
+                    break;
+                }
+            }
+        }
         
-        FHE.requestDecryption(
-            indexCypherTexts,
-            this.callbackDecryptWinnerIndex.selector
-        );
-    }
-
-    /**
-     * @notice [回调函数2] 设置最终的获胜者地址
-     * @param requestId 解密请求ID
-     * @param decryptedWinnerIndex 解密后的获胜者索引
-     * @param signatures 验证签名
-     */
-    function callbackDecryptWinnerIndex(
-        uint256 requestId,
-        uint32 decryptedWinnerIndex,
-        bytes[] memory signatures
-    ) public {
-        // 验证签名防止未授权解密
-        FHE.checkSignatures(requestId, signatures);
+        // 保存结果
+        game.decryptedWinner = winningNumber;
         
-        // 获取对应的游戏ID
-        uint256 gameId = requestToGameId[requestId];
-        require(gameId > 0 || gameId == 0, "Invalid request ID");
-        
-        Game storage game = games[gameId];
-        if (decryptedWinnerIndex < game.playerCount) {
-            address winnerAddress = gamePlayerAddresses[gameId][decryptedWinnerIndex];
+        if (winnerAddress != address(0)) {
+            // 有获胜者
             gameWinners[gameId] = winnerAddress;
             
             // 记录获胜历史
@@ -345,17 +372,48 @@ contract UniqueNumberGameFactory is SepoliaConfig {
                 gameId: gameId,
                 roomName: game.roomName,
                 winner: winnerAddress,
-                winningNumber: game.decryptedWinner,
+                winningNumber: winningNumber,
                 prize: gamePots[gameId],
                 timestamp: block.timestamp
             }));
             
-            emit WinnerDetermined(gameId, game.decryptedWinner, winnerAddress);
+            emit WinnerDetermined(gameId, winningNumber, winnerAddress);
+        } else {
+            // 无获胜者，计算平台费用
+            uint256 totalPot = gamePots[gameId];
+            uint256 platformFee = (totalPot * (PERCENTAGE_BASE - REFUND_PERCENTAGE)) / PERCENTAGE_BASE;
+            platformFees += platformFee;
+            
+            emit NoWinnerDetermined(gameId, totalPot);
         }
-        game.status = GameStatus.Finished;
-        
-        // 清理请求ID映射
-        delete requestToGameId[requestId];
+    }
+
+    /**
+     * @notice [废弃函数] 旧的回调函数 - 保留以兼容现有测试
+     * @dev 这些函数现在已经不会被调用，统一由 callbackDecryptAllSubmissions 处理
+     */
+    function callbackDecryptWinnerNumber(
+        uint256, // requestId
+        uint32,  // decryptedWinnerNumber  
+        bytes[] memory // signatures
+    ) public pure {
+        revert("This callback is deprecated, use callbackDecryptAllSubmissions");
+    }
+
+    function callbackDecryptPlayerSubmissions(
+        uint256, // requestId
+        uint32[] memory, // decryptedNumbers
+        bytes[] memory // signatures
+    ) public pure {
+        revert("This callback is deprecated, use callbackDecryptAllSubmissions");
+    }
+
+    function callbackDecryptWinnerIndex(
+        uint256, // requestId
+        uint32,  // decryptedWinnerIndex
+        bytes[] memory // signatures
+    ) public pure {
+        revert("This callback is deprecated, use callbackDecryptAllSubmissions");
     }
 
     /**
@@ -377,6 +435,66 @@ contract UniqueNumberGameFactory is SepoliaConfig {
         require(success, "Failed to send prize");
 
         emit PrizeClaimed(_gameId, msg.sender, prize);
+    }
+
+    /**
+     * @notice 平局情况下玩家申请退款（90%退款）
+     * @param _gameId 游戏ID
+     */
+    function claimRefund(uint256 _gameId) public {
+        Game storage game = games[_gameId];
+        require(game.status == GameStatus.Finished, "Game is not finished yet");
+        require(gameWinners[_gameId] == address(0), "Game has a winner, no refund available");
+        require(hasPlayerSubmitted[_gameId][msg.sender], "You did not participate in this game");
+        require(!hasClaimedRefund[_gameId][msg.sender], "Refund already claimed");
+
+        hasClaimedRefund[_gameId][msg.sender] = true;
+        
+        // 计算每个玩家的退款金额 (90% of entry fee)
+        uint256 refundAmount = (game.entryFee * REFUND_PERCENTAGE) / PERCENTAGE_BASE;
+        
+        (bool success, ) = msg.sender.call{value: refundAmount}("");
+        require(success, "Failed to send refund");
+
+        emit RefundClaimed(_gameId, msg.sender, refundAmount);
+    }
+
+    /**
+     * @notice 合约创建者提取平台费用
+     */
+    function withdrawPlatformFees() public onlyOwner {
+        require(platformFees > 0, "No platform fees to withdraw");
+
+        uint256 amount = platformFees;
+        platformFees = 0;
+
+        (bool success, ) = msg.sender.call{value: amount}("");
+        require(success, "Failed to withdraw platform fees");
+
+        emit PlatformFeesWithdrawn(msg.sender, amount);
+    }
+
+    /**
+     * @notice 获取平台费余额
+     * @return amount 当前平台费余额
+     */
+    function getPlatformFees() external view returns (uint256) {
+        return platformFees;
+    }
+
+    /**
+     * @notice 检查玩家是否可以申请退款
+     * @param _gameId 游戏ID
+     * @param _player 玩家地址
+     * @return canClaim 是否可以申请退款
+     */
+    function canClaimRefund(uint256 _gameId, address _player) external view returns (bool) {
+        Game storage game = games[_gameId];
+        
+        return game.status == GameStatus.Finished &&
+               gameWinners[_gameId] == address(0) &&
+               hasPlayerSubmitted[_gameId][_player] &&
+               !hasClaimedRefund[_gameId][_player];
     }
 
     // --- View 函数 ---

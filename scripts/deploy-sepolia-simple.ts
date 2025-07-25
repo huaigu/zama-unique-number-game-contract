@@ -8,7 +8,7 @@ async function main() {
   const provider = new ethers.JsonRpcProvider("https://eth-sepolia.public.blastapi.io");
   
   // Get private key from environment
-  const privateKey = process.env.PRIVATE_KEY || "540a33d1d90f9a4e5e902207a48c81f6c491f86991268a295ca4b176c228b176";
+  const privateKey = process.env.PRIVATE_KEY;
   
   if (!privateKey || privateKey.length === 0) {
     console.error("❌ Please set PRIVATE_KEY environment variable");
