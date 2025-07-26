@@ -12,6 +12,7 @@ import { HttpNetworkConfig } from "hardhat/types";
 
 import "./tasks/accounts";
 import "./tasks/FHECounter";
+import "./tasks/TestAsyncDecrypt";
 import "./tasks/UniqueNumberGameFactory";
 
 // Run 'npx hardhat vars setup' to see the list of variables that need to be set
@@ -39,7 +40,7 @@ const config: HardhatUserConfig = {
   },
   etherscan: {
     apiKey: {
-      sepolia: vars.get("ETHERSCAN_API_KEY", ""),
+      sepolia: vars.get("ETHERSCAN_API_KEY", "") || "3VMNGPDVSEBDFYV4WRDUYBRTPFZ73GUKEH",
     },
   },
   gasReporter: {

@@ -97,6 +97,10 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         uint256 timestamp;
     }
 
+    // --- 常量定义 ---
+    
+    uint32 public constant MAX_PLAYERS_PER_ROOM = 10;
+
     // --- 状态变量 ---
 
     uint256 public gameCounter; // 用于生成唯一的 gameId
@@ -107,8 +111,8 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     mapping(uint256 => mapping(uint32 => euint32)) public gameCounts;
     // gameId => list of player addresses
     mapping(uint256 => address[]) public gamePlayerAddresses;
-    // gameId => list of encrypted submissions
-    mapping(uint256 => euint32[]) public gameEncryptedSubmissions;
+    // gameId => fixed array of 10 encrypted submissions (unused slots filled with encrypted 0)
+    mapping(uint256 => euint32[10]) public gameEncryptedSubmissions;
     // gameId => has player submitted?
     mapping(uint256 => mapping(address => bool)) public hasPlayerSubmitted;
     // gameId => prize pool
@@ -119,6 +123,11 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     mapping(uint256 => uint256) private requestToGameId;
     // 获胜历史记录数组
     WinnerRecord[] public winnerHistory;
+    
+    // Error tracking variables
+    mapping(uint256 => bool) public isDecryptionPending;
+    mapping(uint256 => uint256) public latestRequestId;
+    mapping(uint256 => string) public lastCallbackError;
     
     // 平局退款相关
     // gameId => player => has claimed refund
@@ -148,6 +157,11 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     event NoWinnerDetermined(uint256 indexed gameId, uint256 totalRefundPool);
     event RefundClaimed(uint256 indexed gameId, address indexed player, uint256 amount);
     event PlatformFeesWithdrawn(address indexed owner, uint256 amount);
+    
+    // Debug events
+    event CallbackAttempted(uint256 indexed requestId, uint256 indexed gameId);
+    event CallbackSucceeded(uint256 indexed requestId, uint256 indexed gameId);
+    event CallbackFailed(uint256 indexed requestId, uint256 indexed gameId, string reason);
 
     // --- 核心函数 ---
 
@@ -171,6 +185,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         require(bytes(_roomName).length > 0 && bytes(_roomName).length <= 64, "Invalid room name length");
         require(_minNumber > 0 && _maxNumber > _minNumber, "Invalid number range");
         require(_maxPlayers > 1, "Max players must be at least 2");
+        require(_maxPlayers <= MAX_PLAYERS_PER_ROOM, "Max players exceeds room limit");
         require(_maxNumber - _minNumber < 256, "Range is too large for efficient FHE"); // Gas 限制
 
         uint256 gameId = gameCounter;
@@ -193,6 +208,14 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         for (uint32 i = _minNumber; i <= _maxNumber; i++) {
             gameCounts[gameId][i] = FHE.asEuint32(0);
             FHE.allowThis(gameCounts[gameId][i]); // 允许合约访问计数器
+        }
+        
+        // 初始化固定长度的提交数组（用加密的0填充）
+        euint32 encryptedZero = FHE.asEuint32(0);
+        FHE.allowThis(encryptedZero);
+        for (uint32 i = 0; i < MAX_PLAYERS_PER_ROOM; i++) {
+            gameEncryptedSubmissions[gameId][i] = encryptedZero;
+            FHE.allowThis(gameEncryptedSubmissions[gameId][i]);
         }
 
         emit GameCreated(gameId, msg.sender, _roomName, _entryFee, _maxPlayers, newGame.deadline);
@@ -217,7 +240,10 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         euint32 submittedNumber = FHE.fromExternal(_encryptedNumber, inputProof);
         FHE.allowThis(submittedNumber); // 允许合约访问提交的加密数字
         gamePlayerAddresses[_gameId].push(msg.sender);
-        gameEncryptedSubmissions[_gameId].push(submittedNumber);
+        
+        // 将玩家提交存储到固定数组中（使用playerCount-1作为索引）
+        gameEncryptedSubmissions[_gameId][game.playerCount - 1] = submittedNumber;
+        FHE.allowThis(gameEncryptedSubmissions[_gameId][game.playerCount - 1]);
 
         // 更新 FHE 计数
         for (uint32 i = game.minNumber; i <= game.maxNumber; i++) {
@@ -264,47 +290,104 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
      */
     function _findWinner(uint256 _gameId) internal {
         games[_gameId].status = GameStatus.Calculating;
+        isDecryptionPending[_gameId] = true;
         emit WinnerCalculationStarted(_gameId, msg.sender);
 
         Game storage game = games[_gameId];
         
-        // 🎯 新优化逻辑：直接解密所有玩家提交的数字
-        // 批量解密所有玩家提交的数字，然后在明文中计算获胜者
-        bytes32[] memory allSubmissions = new bytes32[](game.playerCount);
-        for (uint32 i = 0; i < game.playerCount; i++) {
+        // 解密固定长度的提交数组（始终解密10个值）
+        bytes32[] memory allSubmissions = new bytes32[](MAX_PLAYERS_PER_ROOM);
+        for (uint32 i = 0; i < MAX_PLAYERS_PER_ROOM; i++) {
             allSubmissions[i] = FHE.toBytes32(gameEncryptedSubmissions[_gameId][i]);
         }
         
-        // 生成解密请求ID并保存对应的游戏ID
-        uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, _gameId, "allSubmissions")));
-        requestToGameId[requestId] = _gameId;
-        
         // 一次性解密所有提交的数字
-        FHE.requestDecryption(
+        uint256 requestId = FHE.requestDecryption(
             allSubmissions,
             this.callbackDecryptAllSubmissions.selector
         );
+        
+        // 保存请求ID和游戏ID的映射
+        requestToGameId[requestId] = _gameId;
+        latestRequestId[_gameId] = requestId;
     }
 
     /**
-     * @notice [新优化回调函数] 处理所有玩家提交数字的解密结果，直接计算获胜者
+     * @notice 处理固定10个玩家提交数字的解密结果
      * @param requestId 解密请求ID
-     * @param decryptedNumbers 解密后的所有玩家提交数字数组
+     * @param player0-player9 解密后的玩家数字（未使用的位置为0）
      * @param signatures 验证签名
      */
     function callbackDecryptAllSubmissions(
         uint256 requestId,
-        uint32[] memory decryptedNumbers,
+        uint32 player0,
+        uint32 player1,
+        uint32 player2,
+        uint32 player3,
+        uint32 player4,
+        uint32 player5,
+        uint32 player6,
+        uint32 player7,
+        uint32 player8,
+        uint32 player9,
         bytes[] memory signatures
     ) public {
+        uint256 gameId = requestToGameId[requestId];
+        emit CallbackAttempted(requestId, gameId);
+        
+        uint32[10] memory allNumbers = [player0, player1, player2, player3, player4, player5, player6, player7, player8, player9];
+        
+        try this._processDecryptedSubmissions(requestId, allNumbers, signatures) {
+            isDecryptionPending[gameId] = false;
+            emit CallbackSucceeded(requestId, gameId);
+        } catch Error(string memory reason) {
+            lastCallbackError[gameId] = reason;
+            emit CallbackFailed(requestId, gameId, reason);
+            if (gameId < gameCounter) {
+                games[gameId].status = GameStatus.Open;
+                isDecryptionPending[gameId] = false;
+            }
+        } catch (bytes memory) {
+            lastCallbackError[gameId] = "Low level error";
+            emit CallbackFailed(requestId, gameId, "Low level error");
+            if (gameId < gameCounter) {
+                games[gameId].status = GameStatus.Open;
+                isDecryptionPending[gameId] = false;
+            }
+        }
+    }
+    
+    /**
+     * @notice 内部函数，实际处理解密结果的逻辑
+     */
+    function _processDecryptedSubmissions(
+        uint256 requestId,
+        uint32[10] memory allDecryptedNumbers,
+        bytes[] memory signatures
+    ) external {
+        
         // 验证签名防止未授权解密
         FHE.checkSignatures(requestId, signatures);
         
         // 获取对应的游戏ID
         uint256 gameId = requestToGameId[requestId];
-        require(gameId > 0 || gameId == 0, "Invalid request ID");
+        require(gameId < gameCounter, "Invalid game ID");
         
         Game storage game = games[gameId];
+        require(game.status == GameStatus.Calculating, "Game not in calculating status");
+        
+        // 从固定数组中提取有效数字（过滤改0值）
+        uint32[] memory validNumbers = new uint32[](game.playerCount);
+        uint32 validCount = 0;
+        
+        for (uint32 i = 0; i < MAX_PLAYERS_PER_ROOM && validCount < game.playerCount; i++) {
+            if (allDecryptedNumbers[i] != 0) {
+                validNumbers[validCount] = allDecryptedNumbers[i];
+                validCount++;
+            }
+        }
+        
+        require(validCount == game.playerCount, "Valid numbers count mismatch");
         
         // 清理请求ID映射
         delete requestToGameId[requestId];
@@ -312,9 +395,55 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         // 游戏结束
         game.status = GameStatus.Finished;
         
-        // 🎯 核心逻辑：在明文数组中找到唯一最小值
-        address winnerAddress = address(0);
-        uint32 winningNumber = 0;
+        // 🎯 核心逻辑：在有效数字数组中找到唯一最小值
+        (address winnerAddress, uint32 winningNumber) = _calculateUniqueMinWinner(
+            gameId,
+            validNumbers
+        );
+        
+        // 保存结果
+        game.decryptedWinner = winningNumber;
+        
+        if (winnerAddress != address(0)) {
+            // 有获胜者
+            gameWinners[gameId] = winnerAddress;
+            
+            // 记录获胜历史
+            winnerHistory.push(WinnerRecord({
+                gameId: gameId,
+                roomName: game.roomName,
+                winner: winnerAddress,
+                winningNumber: winningNumber,
+                prize: gamePots[gameId],
+                timestamp: block.timestamp
+            }));
+            
+            emit WinnerDetermined(gameId, winningNumber, winnerAddress);
+        } else {
+            // 无获胜者，计算平台费用
+            uint256 totalPot = gamePots[gameId];
+            uint256 platformFee = (totalPot * (PERCENTAGE_BASE - REFUND_PERCENTAGE)) / PERCENTAGE_BASE;
+            platformFees += platformFee;
+            
+            emit NoWinnerDetermined(gameId, totalPot);
+        }
+    }
+
+    /**
+     * @notice 计算唯一最小数字获胜者
+     * @dev 分离出来的纯逻辑函数，便于测试和调试
+     * @param gameId 游戏ID
+     * @param decryptedNumbers 解密后的玩家提交数字
+     * @return winnerAddress 获胜者地址，如果没有获胜者则为address(0)
+     * @return winningNumber 获胜数字，如果没有获胜者则为0
+     */
+    function _calculateUniqueMinWinner(
+        uint256 gameId,
+        uint32[] memory decryptedNumbers
+    ) internal view returns (address winnerAddress, uint32 winningNumber) {
+        // 验证输入参数
+        require(decryptedNumbers.length > 0, "Empty decrypted numbers array");
+        require(gameId < gameCounter, "Invalid game ID");
         
         // 统计每个数字的出现次数和找唯一数字
         uint32[] memory uniqueNumbers = new uint32[](decryptedNumbers.length);
@@ -362,61 +491,11 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             }
         }
         
-        // 保存结果
-        game.decryptedWinner = winningNumber;
-        
-        if (winnerAddress != address(0)) {
-            // 有获胜者
-            gameWinners[gameId] = winnerAddress;
-            
-            // 记录获胜历史
-            winnerHistory.push(WinnerRecord({
-                gameId: gameId,
-                roomName: game.roomName,
-                winner: winnerAddress,
-                winningNumber: winningNumber,
-                prize: gamePots[gameId],
-                timestamp: block.timestamp
-            }));
-            
-            emit WinnerDetermined(gameId, winningNumber, winnerAddress);
-        } else {
-            // 无获胜者，计算平台费用
-            uint256 totalPot = gamePots[gameId];
-            uint256 platformFee = (totalPot * (PERCENTAGE_BASE - REFUND_PERCENTAGE)) / PERCENTAGE_BASE;
-            platformFees += platformFee;
-            
-            emit NoWinnerDetermined(gameId, totalPot);
-        }
+        // 如果没有找到唯一数字，返回零值
+        // winnerAddress 和 winningNumber 已经初始化为零值
     }
 
-    /**
-     * @notice [废弃函数] 旧的回调函数 - 保留以兼容现有测试
-     * @dev 这些函数现在已经不会被调用，统一由 callbackDecryptAllSubmissions 处理
-     */
-    function callbackDecryptWinnerNumber(
-        uint256, // requestId
-        uint32,  // decryptedWinnerNumber  
-        bytes[] memory // signatures
-    ) public pure {
-        revert("This callback is deprecated, use callbackDecryptAllSubmissions");
-    }
 
-    function callbackDecryptPlayerSubmissions(
-        uint256, // requestId
-        uint32[] memory, // decryptedNumbers
-        bytes[] memory // signatures
-    ) public pure {
-        revert("This callback is deprecated, use callbackDecryptAllSubmissions");
-    }
-
-    function callbackDecryptWinnerIndex(
-        uint256, // requestId
-        uint32,  // decryptedWinnerIndex
-        bytes[] memory // signatures
-    ) public pure {
-        revert("This callback is deprecated, use callbackDecryptAllSubmissions");
-    }
 
     /**
      * @notice 获胜者领取奖金
@@ -808,4 +887,24 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
 
         return (topPlayers, winCounts, totalWinnings);
     }
+    
+    /**
+     * @notice 获取callback调试信息
+     * @param gameId 游戏ID
+     * @return isPending 是否正在等待解密
+     * @return requestId 最新请求ID
+     * @return lastError 最后一次错误信息
+     */
+    function getCallbackDebugInfo(uint256 gameId) external view returns (
+        bool isPending,
+        uint256 requestId,
+        string memory lastError
+    ) {
+        return (
+            isDecryptionPending[gameId],
+            latestRequestId[gameId],
+            lastCallbackError[gameId]
+        );
+    }
+    
 }

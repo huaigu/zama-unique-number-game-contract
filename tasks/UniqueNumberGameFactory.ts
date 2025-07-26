@@ -9,6 +9,89 @@ task("game:address", "Get the deployed UniqueNumberGameFactory address")
     return deployment.address;
   });
 
+// Create a default 3-player game
+task("game:create-default", "Create a default 3-player game")
+  .addOptionalParam("address", "Contract address (if not using deployment)")
+  .setAction(async (taskArgs, hre: HardhatRuntimeEnvironment) => {
+    const { ethers } = hre;
+    const [deployer] = await ethers.getSigners();
+
+    // Get contract address
+    const contractAddress = taskArgs.address || (await hre.deployments.get("UniqueNumberGameFactory")).address;
+    const gameFactory = await ethers.getContractAt("UniqueNumberGameFactory", contractAddress);
+
+    // Default parameters for 3-player game
+    const defaultParams = {
+      name: "Default 3-Player Game",
+      min: 1,
+      max: 10,
+      players: 3,
+      fee: "0.01", // 0.01 ETH
+      duration: 1800 // 30 minutes
+    };
+
+    console.log(`🎮 Creating default 3-player game with params:`);
+    console.log(`  Room Name: ${defaultParams.name}`);
+    console.log(`  Number Range: ${defaultParams.min} - ${defaultParams.max}`);
+    console.log(`  Max Players: ${defaultParams.players}`);
+    console.log(`  Entry Fee: ${defaultParams.fee} ETH`);
+    console.log(`  Duration: ${Math.floor(defaultParams.duration / 60)} minutes`);
+    console.log(`  Creator: ${deployer.address}`);
+
+    const entryFee = ethers.parseEther(defaultParams.fee);
+    
+    try {
+      const tx = await gameFactory
+        .connect(deployer)
+        .createGame(
+          defaultParams.name,
+          defaultParams.min,
+          defaultParams.max,
+          defaultParams.players,
+          entryFee,
+          defaultParams.duration
+        );
+
+      console.log(`\n⏳ Transaction submitted: ${tx.hash}`);
+      const receipt = await tx.wait();
+      console.log(`✅ Game created! Transaction confirmed in block: ${receipt?.blockNumber}`);
+
+      // Get the game ID from events
+      const gameCreatedEvent = receipt?.logs.find((log: any) => {
+        try {
+          const parsed = gameFactory.interface.parseLog(log);
+          return parsed?.name === "GameCreated";
+        } catch {
+          return false;
+        }
+      });
+
+      if (gameCreatedEvent) {
+        const parsed = gameFactory.interface.parseLog(gameCreatedEvent);
+        const gameId = parsed?.args.gameId;
+        console.log(`🎯 Game ID: ${gameId}`);
+        console.log(`\n📋 Quick Commands:`);
+        console.log(`  View game info: npx hardhat --network sepolia game:info --id ${gameId}`);
+        console.log(`  Debug callbacks: npx hardhat --network sepolia game:debug-callbacks --id ${gameId}`);
+        
+        const deadline = new Date(Date.now() + defaultParams.duration * 1000);
+        console.log(`\n⏰ Game Details:`);
+        console.log(`  Deadline: ${deadline.toLocaleString()}`);
+        console.log(`  Players needed: ${defaultParams.players}`);
+        console.log(`  Prize pool will be: ${(parseFloat(defaultParams.fee) * defaultParams.players).toFixed(3)} ETH`);
+        
+        return { gameId: gameId.toString(), txHash: receipt?.hash };
+      } else {
+        console.log("⚠️  Could not extract game ID from transaction events");
+        return { txHash: receipt?.hash };
+      }
+      
+    } catch (error) {
+      console.error("❌ Error creating game:", error);
+      throw error;
+    }
+  });
+
 // Create a new game
 task("game:create", "Create a new game")
   .addOptionalParam("name", "Room name", "Hardhat Test Room", types.string)
@@ -25,6 +108,14 @@ task("game:create", "Create a new game")
     // Get contract address
     const contractAddress = taskArgs.address || (await hre.deployments.get("UniqueNumberGameFactory")).address;
     const gameFactory = await ethers.getContractAt("UniqueNumberGameFactory", contractAddress);
+
+    // Validate parameters
+    if (taskArgs.players > 10) {
+      throw new Error("❌ Max players cannot exceed 10 (contract limit)");
+    }
+    if (taskArgs.players < 2) {
+      throw new Error("❌ Max players must be at least 2");
+    }
 
     console.log(`Creating game with params:`);
     console.log(`  Room Name: ${taskArgs.name}`);
@@ -95,6 +186,24 @@ task("game:info", "Get game information")
       if (winnerAddress !== ethers.ZeroAddress) {
         console.log(`Winner Address: ${winnerAddress}`);
       }
+    }
+    
+    // Add callback debug information
+    console.log(`\n🔍 Callback Debug Information:`);
+    try {
+      const debugInfo = await gameFactory.getCallbackDebugInfo(taskArgs.id);
+      console.log(`Is Decryption Pending: ${debugInfo.isPending}`);
+      console.log(`Latest Request ID: ${debugInfo.requestId}`); 
+      if (debugInfo.lastError && debugInfo.lastError.length > 0) {
+        console.log(`Last Error: ${debugInfo.lastError}`);
+      } else {
+        console.log(`Last Error: None`);
+      }
+      
+      // Global callback stats - removed for optimization
+      
+    } catch (error) {
+      console.log(`Error fetching debug info: ${error}`);
     }
 
     return game;
@@ -445,4 +554,84 @@ task("game:list", "List games with complete details")
     console.log(`   Contract Owner: ${await gameFactory.owner()}`);
     
     return { totalGames, statusCounts, platformFees: ethers.formatEther(platformFees) };
+  });
+
+// Debug callback status
+task("game:debug-callbacks", "Debug callback status and errors")
+  .addOptionalParam("id", "Game ID to check (if not provided, shows global stats)", undefined, types.int)
+  .addOptionalParam("address", "Contract address")
+  .setAction(async (taskArgs, hre: HardhatRuntimeEnvironment) => {
+    const { ethers } = hre;
+
+    const contractAddress = taskArgs.address || (await hre.deployments.get("UniqueNumberGameFactory")).address;
+    const gameFactory = await ethers.getContractAt("UniqueNumberGameFactory", contractAddress);
+
+    console.log(`\n🔍 Callback Debug Information`);
+    console.log(`Contract: ${contractAddress}`);
+    
+    // Global callback statistics - removed for optimization
+    
+    if (taskArgs.id !== undefined) {
+      // Specific game debug info
+      console.log(`\n🎮 Game ${taskArgs.id} Debug Info:`);
+      try {
+        const debugInfo = await gameFactory.getCallbackDebugInfo(taskArgs.id);
+        console.log(`Is Decryption Pending: ${debugInfo.isPending}`);
+        console.log(`Latest Request ID: ${debugInfo.requestId}`);
+        
+        if (debugInfo.lastError && debugInfo.lastError.length > 0) {
+          console.log(`\n❌ Last Error:`);
+          console.log(`${debugInfo.lastError}`);
+        } else {
+          console.log(`Last Error: None`);
+        }
+        
+        // Game status
+        const game = await gameFactory.games(taskArgs.id);
+        console.log(`\n📊 Game Status:`);
+        console.log(`Status: ${["Open", "Calculating", "Finished", "PrizeClaimed"][Number(game.status)]}`);
+        console.log(`Player Count: ${game.playerCount}`);
+        
+      } catch (error) {
+        console.log(`Error fetching game debug info: ${error}`);
+      }
+    } else {
+      // Check all games with pending decryptions
+      console.log(`\n🔄 Checking all games for pending decryptions...`);
+      try {
+        const gameCounter = await gameFactory.gameCounter();
+        const totalGames = Number(gameCounter);
+        
+        let pendingGames = [];
+        for (let i = 0; i < totalGames; i++) {
+          try {
+            const debugInfo = await gameFactory.getCallbackDebugInfo(i);
+            if (debugInfo.isPending) {
+              pendingGames.push({
+                gameId: i,
+                requestId: debugInfo.requestId,
+                lastError: debugInfo.lastError
+              });
+            }
+          } catch (error) {
+            // Skip games that don't exist or can't be read
+          }
+        }
+        
+        if (pendingGames.length > 0) {
+          console.log(`\n⏳ Games with Pending Decryptions:`);
+          pendingGames.forEach(game => {
+            console.log(`Game ${game.gameId}: Request ID ${game.requestId}`);
+            if (game.lastError && game.lastError.length > 0) {
+              console.log(`  Last Error: ${game.lastError}`);
+            }
+          });
+        } else {
+          console.log(`✅ No games have pending decryptions`);
+        }
+        
+      } catch (error) {
+        console.log(`Error checking pending games: ${error}`);
+      }
+    }
   });

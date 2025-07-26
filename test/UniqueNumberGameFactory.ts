@@ -96,6 +96,11 @@ describe("UniqueNumberGameFactory", function () {
       await expect(
         gameContract.createGame(roomName, 1, 300, maxPlayers, entryFee, deadlineDuration)
       ).to.be.revertedWith("Range is too large for efficient FHE");
+      
+      // Max players exceeds room limit (more than 10)
+      await expect(
+        gameContract.createGame(roomName, minNumber, maxNumber, 11, entryFee, deadlineDuration)
+      ).to.be.revertedWith("Max players exceeds room limit");
     });
 
     it("should increment game counter for multiple games", async function () {
