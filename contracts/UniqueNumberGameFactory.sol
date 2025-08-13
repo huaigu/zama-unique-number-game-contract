@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {FHE, euint32, externalEuint32, ebool} from "@fhevm/solidity/lib/FHE.sol";
 import {SepoliaConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
 
-// 简单的 Owner 管理
+// Simple Owner management
 abstract contract Ownable {
     address private _owner;
 
@@ -34,10 +34,10 @@ abstract contract Ownable {
 /**
  * @title UniqueNumberGameFactory
  * @author Gemini AI based on Zama FHE
- * @notice 一个功能完备的最小唯一数字游戏平台，支持创建多局游戏、自定义规则和费用。
+ * @notice A fully-featured minimal unique number game platform that supports creating multiple games, custom rules and fees.
  */
 contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
-    // --- 数据结构 ---
+    // --- Data Structures ---
     enum GameStatus {
         Open,
         Calculating,
@@ -50,20 +50,20 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         address creator;
         GameStatus status;
         string roomName;
-        // 游戏规则
+        // Game rules
         uint32 minNumber;
         uint32 maxNumber;
         uint32 maxPlayers;
         uint256 entryFee;
         uint256 deadline;
-        // 游戏进程
+        // Game progress
         uint32 playerCount;
-        // FHE 计算结果
+        // FHE calculation results
         euint32 encryptedWinner;
         uint32 decryptedWinner;
     }
 
-    // GameSummary结构体，用于提供游戏的摘要信息
+    // GameSummary struct for providing game summary information
     struct GameSummary {
         uint256 gameId;
         string roomName;
@@ -80,14 +80,14 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         uint32 winningNumber;
     }
 
-    // 玩家统计结构体
+    // Player statistics struct
     struct PlayerStats {
         uint256 gamesPlayed;
         uint256 gamesWon;
         uint256 totalWinnings;
     }
 
-    // 获胜记录结构体
+    // Winner record struct
     struct WinnerRecord {
         uint256 gameId;
         string roomName;
@@ -97,16 +97,16 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         uint256 timestamp;
     }
 
-    // --- 常量定义 ---
+    // --- Constant Definitions ---
     
     uint32 public constant MAX_PLAYERS_PER_ROOM = 10;
 
-    // --- 状态变量 ---
+    // --- State Variables ---
 
-    uint256 public gameCounter; // 用于生成唯一的 gameId
-    mapping(uint256 => Game) public games; // 存储所有游戏
+    uint256 public gameCounter; // Used to generate unique gameId
+    mapping(uint256 => Game) public games; // Store all games
 
-    // 存储每局游戏的数据，因为 mapping 不能在 struct 中
+    // Store game data for each game, as mappings cannot be in structs
     // gameId => number => encrypted count
     mapping(uint256 => mapping(uint32 => euint32)) public gameCounts;
     // gameId => list of player addresses
@@ -119,9 +119,9 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     mapping(uint256 => uint256) public gamePots;
     // gameId => winner address
     mapping(uint256 => address) public gameWinners;
-    // requestId => gameId (用于回调函数识别游戏)
+    // requestId => gameId (used for callback function to identify game)
     mapping(uint256 => uint256) private requestToGameId;
-    // 获胜历史记录数组
+    // Winner history records array
     WinnerRecord[] public winnerHistory;
     
     // Error tracking variables
@@ -129,18 +129,18 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     mapping(uint256 => uint256) public latestRequestId;
     mapping(uint256 => string) public lastCallbackError;
     
-    // 平局退款相关
+    // Tie refund related
     // gameId => player => has claimed refund
     mapping(uint256 => mapping(address => bool)) public hasClaimedRefund;
     // gameId => player => has claimed prize
     mapping(uint256 => mapping(address => bool)) public hasPlayerClaimed;
-    // 平台费累积
+    // Platform fees accumulation
     uint256 public platformFees;
-    // 退款比例 (90% = 9000 / 10000)
+    // Refund percentage (90% = 9000 / 10000)
     uint256 public constant REFUND_PERCENTAGE = 9000;
     uint256 public constant PERCENTAGE_BASE = 10000;
 
-    // --- 事件 ---
+    // --- Events ---
 
     event GameCreated(
         uint256 indexed gameId,
@@ -163,16 +163,16 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     event CallbackSucceeded(uint256 indexed requestId, uint256 indexed gameId);
     event CallbackFailed(uint256 indexed requestId, uint256 indexed gameId, string reason);
 
-    // --- 核心函数 ---
+    // --- Core Functions ---
 
     /**
-     * @notice 创建一局新游戏
-     * @param _roomName 房间名字
-     * @param _minNumber 数字范围下限
-     * @param _maxNumber 数字范围上限
-     * @param _maxPlayers 最大参与人数
-     * @param _entryFee 参与费用 (in wei)
-     * @param _deadlineDuration 游戏持续时间 (in seconds from now)
+     * @notice Create a new game
+     * @param _roomName Room name
+     * @param _minNumber Lower limit of number range
+     * @param _maxNumber Upper limit of number range
+     * @param _maxPlayers Maximum number of players
+     * @param _entryFee Entry fee (in wei)
+     * @param _deadlineDuration Game duration (in seconds from now)
      */
     function createGame(
         string calldata _roomName,
@@ -186,7 +186,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         require(_minNumber > 0 && _maxNumber > _minNumber, "Invalid number range");
         require(_maxPlayers > 1, "Max players must be at least 2");
         require(_maxPlayers <= MAX_PLAYERS_PER_ROOM, "Max players exceeds room limit");
-        require(_maxNumber - _minNumber < 256, "Range is too large for efficient FHE"); // Gas 限制
+        require(_maxNumber - _minNumber < 256, "Range is too large for efficient FHE"); // Gas limit
 
         uint256 gameId = gameCounter;
         gameCounter++;
@@ -201,16 +201,16 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         newGame.maxPlayers = _maxPlayers;
         newGame.entryFee = _entryFee;
         newGame.deadline = block.timestamp + _deadlineDuration;
-        newGame.encryptedWinner = FHE.asEuint32(_maxNumber + 1); // 初始化为不可能的大数
-        FHE.allowThis(newGame.encryptedWinner); // 允许合约访问这个加密值
+        newGame.encryptedWinner = FHE.asEuint32(_maxNumber + 1); // Initialize to an impossible large number
+        FHE.allowThis(newGame.encryptedWinner); // Allow contract to access this encrypted value
 
-        // 初始化 FHE 计数器
+        // Initialize FHE counters
         for (uint32 i = _minNumber; i <= _maxNumber; i++) {
             gameCounts[gameId][i] = FHE.asEuint32(0);
-            FHE.allowThis(gameCounts[gameId][i]); // 允许合约访问计数器
+            FHE.allowThis(gameCounts[gameId][i]); // Allow contract to access counter
         }
         
-        // 初始化固定长度的提交数组（用加密的0填充）
+        // Initialize fixed-length submission array (filled with encrypted zeros)
         euint32 encryptedZero = FHE.asEuint32(0);
         FHE.allowThis(encryptedZero);
         for (uint32 i = 0; i < MAX_PLAYERS_PER_ROOM; i++) {
@@ -222,9 +222,9 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 提交一个加密数字参与游戏
-     * @param _gameId 游戏ID
-     * @param _encryptedNumber 加密的数字
+     * @notice Submit an encrypted number to participate in the game
+     * @param _gameId Game ID
+     * @param _encryptedNumber Encrypted number
      */
     function submitNumber(uint256 _gameId, externalEuint32 _encryptedNumber, bytes calldata inputProof) public payable {
         Game storage game = games[_gameId];
@@ -238,14 +238,14 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         gamePots[_gameId] += msg.value;
 
         euint32 submittedNumber = FHE.fromExternal(_encryptedNumber, inputProof);
-        FHE.allowThis(submittedNumber); // 允许合约访问提交的加密数字
+        FHE.allowThis(submittedNumber); // Allow contract to access submitted encrypted number
         gamePlayerAddresses[_gameId].push(msg.sender);
         
-        // 将玩家提交存储到固定数组中（使用playerCount-1作为索引）
+        // Store player submission in fixed array (using playerCount-1 as index)
         gameEncryptedSubmissions[_gameId][game.playerCount - 1] = submittedNumber;
         FHE.allowThis(gameEncryptedSubmissions[_gameId][game.playerCount - 1]);
 
-        // 更新 FHE 计数
+        // Update FHE count
         for (uint32 i = game.minNumber; i <= game.maxNumber; i++) {
             euint32 numberToCompare = FHE.asEuint32(i);
             FHE.allowThis(numberToCompare);
@@ -266,15 +266,15 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
 
         emit SubmissionReceived(_gameId, msg.sender, game.playerCount);
 
-        // 如果达到最大人数，立即触发开奖
+        // If maximum number of players is reached, trigger prize draw immediately
         if (game.playerCount == game.maxPlayers) {
             _findWinner(_gameId);
         }
     }
 
     /**
-     * @notice 在截止时间后手动触发开奖
-     * @param _gameId 游戏ID
+     * @notice Manually trigger prize draw after deadline
+     * @param _gameId Game ID
      */
     function findWinnerByDeadline(uint256 _gameId) public {
         Game storage game = games[_gameId];
@@ -286,7 +286,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 内部函数，执行寻找获胜数字的FHE计算
+     * @notice Internal function to execute FHE calculation for finding winning number
      */
     function _findWinner(uint256 _gameId) internal {
         games[_gameId].status = GameStatus.Calculating;
@@ -295,28 +295,28 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
 
         Game storage game = games[_gameId];
         
-        // 解密固定长度的提交数组（始终解密10个值）
+        // Decrypt fixed-length submission array (always decrypt 10 values)
         bytes32[] memory allSubmissions = new bytes32[](MAX_PLAYERS_PER_ROOM);
         for (uint32 i = 0; i < MAX_PLAYERS_PER_ROOM; i++) {
             allSubmissions[i] = FHE.toBytes32(gameEncryptedSubmissions[_gameId][i]);
         }
         
-        // 一次性解密所有提交的数字
+        // Decrypt all submitted numbers at once
         uint256 requestId = FHE.requestDecryption(
             allSubmissions,
             this.callbackDecryptAllSubmissions.selector
         );
         
-        // 保存请求ID和游戏ID的映射
+        // Save mapping of request ID to game ID
         requestToGameId[requestId] = _gameId;
         latestRequestId[_gameId] = requestId;
     }
 
     /**
-     * @notice 处理固定10个玩家提交数字的解密结果
-     * @param requestId 解密请求ID
-     * @param player0-player9 解密后的玩家数字（未使用的位置为0）
-     * @param signatures 验证签名
+     * @notice Handle decryption results of fixed 10 player submitted numbers
+     * @param requestId Decryption request ID
+     * @param player0-player9 Decrypted player numbers (unused positions are 0)
+     * @param signatures Verification signatures
      */
     function callbackDecryptAllSubmissions(
         uint256 requestId,
@@ -358,7 +358,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
     
     /**
-     * @notice 内部函数，实际处理解密结果的逻辑
+     * @notice Internal function that actually handles decryption result logic
      */
     function _processDecryptedSubmissions(
         uint256 requestId,
@@ -366,17 +366,17 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         bytes[] memory signatures
     ) external {
         
-        // 验证签名防止未授权解密
+        // Verify signatures to prevent unauthorized decryption
         FHE.checkSignatures(requestId, signatures);
         
-        // 获取对应的游戏ID
+        // Get corresponding game ID
         uint256 gameId = requestToGameId[requestId];
         require(gameId < gameCounter, "Invalid game ID");
         
         Game storage game = games[gameId];
         require(game.status == GameStatus.Calculating, "Game not in calculating status");
         
-        // 从固定数组中提取有效数字（过滤改0值）
+        // Extract valid numbers from fixed array (filter out 0 values)
         uint32[] memory validNumbers = new uint32[](game.playerCount);
         uint32 validCount = 0;
         
@@ -389,26 +389,26 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         
         require(validCount == game.playerCount, "Valid numbers count mismatch");
         
-        // 清理请求ID映射
+        // Clean up request ID mapping
         delete requestToGameId[requestId];
         
-        // 游戏结束
+        // Game ended
         game.status = GameStatus.Finished;
         
-        // 🎯 核心逻辑：在有效数字数组中找到唯一最小值
+        // 🎯 Core logic: Find unique minimum value in valid numbers array
         (address winnerAddress, uint32 winningNumber) = _calculateUniqueMinWinner(
             gameId,
             validNumbers
         );
         
-        // 保存结果
+        // Save results
         game.decryptedWinner = winningNumber;
         
         if (winnerAddress != address(0)) {
-            // 有获胜者
+            // Has winner
             gameWinners[gameId] = winnerAddress;
             
-            // 记录获胜历史
+            // Record winning history
             winnerHistory.push(WinnerRecord({
                 gameId: gameId,
                 roomName: game.roomName,
@@ -420,7 +420,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             
             emit WinnerDetermined(gameId, winningNumber, winnerAddress);
         } else {
-            // 无获胜者，计算平台费用
+            // No winner, calculate platform fees
             uint256 totalPot = gamePots[gameId];
             uint256 platformFee = (totalPot * (PERCENTAGE_BASE - REFUND_PERCENTAGE)) / PERCENTAGE_BASE;
             platformFees += platformFee;
@@ -430,26 +430,26 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 计算唯一最小数字获胜者
-     * @dev 分离出来的纯逻辑函数，便于测试和调试
-     * @param gameId 游戏ID
-     * @param decryptedNumbers 解密后的玩家提交数字
-     * @return winnerAddress 获胜者地址，如果没有获胜者则为address(0)
-     * @return winningNumber 获胜数字，如果没有获胜者则为0
+     * @notice Calculate unique minimum number winner
+     * @dev Separated pure logic function for easy testing and debugging
+     * @param gameId Game ID
+     * @param decryptedNumbers Decrypted player submitted numbers
+     * @return winnerAddress Winner address, address(0) if no winner
+     * @return winningNumber Winning number, 0 if no winner
      */
     function _calculateUniqueMinWinner(
         uint256 gameId,
         uint32[] memory decryptedNumbers
     ) internal view returns (address winnerAddress, uint32 winningNumber) {
-        // 验证输入参数
+        // Validate input parameters
         require(decryptedNumbers.length > 0, "Empty decrypted numbers array");
         require(gameId < gameCounter, "Invalid game ID");
         
-        // 统计每个数字的出现次数和找唯一数字
+        // Count occurrences of each number and find unique numbers
         uint32[] memory uniqueNumbers = new uint32[](decryptedNumbers.length);
         uint32 uniqueCount = 0;
         
-        // 第一步：统计频次并找到唯一数字
+        // First step: Count frequencies and find unique numbers
         bool[] memory processed = new bool[](decryptedNumbers.length);
         for (uint32 i = 0; i < decryptedNumbers.length; i++) {
             if (processed[i]) continue;
@@ -457,7 +457,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             uint32 currentNumber = decryptedNumbers[i];
             uint32 count = 0;
             
-            // 计算当前数字出现次数
+            // Calculate occurrence count of current number
             for (uint32 j = 0; j < decryptedNumbers.length; j++) {
                 if (decryptedNumbers[j] == currentNumber) {
                     count++;
@@ -465,14 +465,14 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
                 }
             }
             
-            // 如果是唯一数字（出现次数为1），记录下来
+            // If it's a unique number (appears only once), record it
             if (count == 1) {
                 uniqueNumbers[uniqueCount] = currentNumber;
                 uniqueCount++;
             }
         }
         
-        // 第二步：在唯一数字中找到最小值
+        // Second step: Find minimum value among unique numbers
         if (uniqueCount > 0) {
             uint32 minUniqueNumber = uniqueNumbers[0];
             for (uint32 i = 1; i < uniqueCount; i++) {
@@ -481,7 +481,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
                 }
             }
             
-            // 第三步：找到提交最小唯一数字的玩家
+            // Third step: Find player who submitted the minimum unique number
             for (uint32 i = 0; i < decryptedNumbers.length; i++) {
                 if (decryptedNumbers[i] == minUniqueNumber) {
                     winnerAddress = gamePlayerAddresses[gameId][i];
@@ -491,15 +491,15 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             }
         }
         
-        // 如果没有找到唯一数字，返回零值
-        // winnerAddress 和 winningNumber 已经初始化为零值
+        // If no unique number is found, return zero values
+        // winnerAddress and winningNumber are already initialized to zero values
     }
 
 
 
     /**
-     * @notice 获胜者领取奖金
-     * @param _gameId 游戏ID
+     * @notice Winner claims prize
+     * @param _gameId Game ID
      */
     function claimPrize(uint256 _gameId) public {
         Game storage game = games[_gameId];
@@ -509,7 +509,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         uint256 prize = gamePots[_gameId];
         require(prize > 0, "Prize already claimed or no prize");
 
-        gamePots[_gameId] = 0; // 防止重入攻击
+        gamePots[_gameId] = 0; // Prevent reentrancy attacks
         game.status = GameStatus.PrizeClaimed;
         hasPlayerClaimed[_gameId][msg.sender] = true;
 
@@ -520,8 +520,8 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 平局情况下玩家申请退款（90%退款）
-     * @param _gameId 游戏ID
+     * @notice Player applies for refund in case of tie (90% refund)
+     * @param _gameId Game ID
      */
     function claimRefund(uint256 _gameId) public {
         Game storage game = games[_gameId];
@@ -532,7 +532,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
 
         hasClaimedRefund[_gameId][msg.sender] = true;
         
-        // 计算每个玩家的退款金额 (90% of entry fee)
+        // Calculate refund amount for each player (90% of entry fee)
         uint256 refundAmount = (game.entryFee * REFUND_PERCENTAGE) / PERCENTAGE_BASE;
         
         (bool success, ) = msg.sender.call{value: refundAmount}("");
@@ -542,7 +542,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 合约创建者提取平台费用
+     * @notice Contract creator withdraws platform fees
      */
     function withdrawPlatformFees() public onlyOwner {
         require(platformFees > 0, "No platform fees to withdraw");
@@ -557,18 +557,18 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 获取平台费余额
-     * @return amount 当前平台费余额
+     * @notice Get platform fee balance
+     * @return amount Current platform fee balance
      */
     function getPlatformFees() external view returns (uint256) {
         return platformFees;
     }
 
     /**
-     * @notice 检查玩家是否可以申请退款
-     * @param _gameId 游戏ID
-     * @param _player 玩家地址
-     * @return canClaim 是否可以申请退款
+     * @notice Check if player can apply for refund
+     * @param _gameId Game ID
+     * @param _player Player address
+     * @return canClaim Whether can apply for refund
      */
     function canClaimRefund(uint256 _gameId, address _player) external view returns (bool) {
         Game storage game = games[_gameId];
@@ -579,11 +579,11 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
                !hasClaimedRefund[_gameId][_player];
     }
 
-    // --- View 函数 ---
+    // --- View Functions ---
 
     /**
-     * @notice 获取所有游戏列表
-     * @return games 所有游戏的数组
+     * @notice Get all games list
+     * @return games Array of all games
      */
     function getAllGames() external view returns (Game[] memory) {
         Game[] memory allGames = new Game[](gameCounter);
@@ -594,11 +594,11 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 获取活跃游戏列表（状态为Open）
-     * @return activeGames 活跃游戏的数组
+     * @notice Get active games list (status is Open)
+     * @return activeGames Array of active games
      */
     function getActiveGames() external view returns (Game[] memory) {
-        // 首先计算活跃游戏数量
+        // First calculate the number of active games
         uint256 activeCount = 0;
         for (uint256 i = 0; i < gameCounter; i++) {
             if (games[i].status == GameStatus.Open) {
@@ -606,7 +606,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             }
         }
 
-        // 创建数组并填充活跃游戏
+        // Create array and fill with active games
         Game[] memory activeGames = new Game[](activeCount);
         uint256 currentIndex = 0;
         for (uint256 i = 0; i < gameCounter; i++) {
@@ -619,12 +619,12 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 根据状态获取游戏列表
-     * @param status 游戏状态
-     * @return gamesByStatus 指定状态的游戏数组
+     * @notice Get games list by status
+     * @param status Game status
+     * @return gamesByStatus Array of games with specified status
      */
     function getGamesByStatus(GameStatus status) external view returns (Game[] memory) {
-        // 首先计算指定状态的游戏数量
+        // First calculate the number of games with specified status
         uint256 statusCount = 0;
         for (uint256 i = 0; i < gameCounter; i++) {
             if (games[i].status == status) {
@@ -632,7 +632,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             }
         }
 
-        // 创建数组并填充指定状态的游戏
+        // Create array and fill with games of specified status
         Game[] memory gamesByStatus = new Game[](statusCount);
         uint256 currentIndex = 0;
         for (uint256 i = 0; i < gameCounter; i++) {
@@ -645,10 +645,10 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 分页获取游戏列表
-     * @param offset 偏移量
-     * @param limit 限制数量
-     * @return paginatedGames 分页的游戏数组
+     * @notice Get paginated games list
+     * @param offset Offset value
+     * @param limit Limit count
+     * @return paginatedGames Paginated games array
      */
     function getGamesWithPagination(uint256 offset, uint256 limit) external view returns (Game[] memory) {
         require(offset < gameCounter, "Offset exceeds game count");
@@ -669,9 +669,9 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 获取游戏的摘要信息
-     * @param gameId 游戏ID
-     * @return summary 游戏摘要信息
+     * @notice Get game summary information
+     * @param gameId Game ID
+     * @return summary Game summary information
      */
     function getGameSummary(uint256 gameId) external view returns (GameSummary memory) {
         require(gameId < gameCounter, "Game does not exist");
@@ -696,12 +696,12 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 获取玩家参与的游戏ID列表
-     * @param player 玩家地址
-     * @return gameIds 玩家参与的游戏ID数组
+     * @notice Get list of game IDs that player participated in
+     * @param player Player address
+     * @return gameIds Array of game IDs that player participated in
      */
     function getPlayerGames(address player) external view returns (uint256[] memory) {
-        // 首先计算玩家参与的游戏数量
+        // First calculate the number of games player participated in
         uint256 playerGameCount = 0;
         for (uint256 i = 0; i < gameCounter; i++) {
             if (hasPlayerSubmitted[i][player]) {
@@ -709,7 +709,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             }
         }
 
-        // 创建数组并填充玩家参与的游戏ID
+        // Create array and fill with game IDs that player participated in
         uint256[] memory playerGames = new uint256[](playerGameCount);
         uint256 currentIndex = 0;
         for (uint256 i = 0; i < gameCounter; i++) {
@@ -723,17 +723,17 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 获取游戏总数
-     * @return count 总游戏数量
+     * @notice Get total games count
+     * @return count Total games count
      */
     function getTotalGamesCount() external view returns (uint256) {
         return gameCounter;
     }
 
     /**
-     * @notice 检查游戏是否可以开始开奖
-     * @param gameId 游戏ID
-     * @return canFinalize 是否可以开奖
+     * @notice Check if game can start prize draw
+     * @param gameId Game ID
+     * @return canFinalize Whether can start prize draw
      */
     function canFinalizeGame(uint256 gameId) external view returns (bool) {
         require(gameId < gameCounter, "Game does not exist");
@@ -744,29 +744,29 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             return false;
         }
         
-        // 达到最大人数或者过了截止时间且有参与者
+        // Reached maximum number of players or passed deadline and has participants
         return (game.playerCount == game.maxPlayers) || 
                (block.timestamp >= game.deadline && game.playerCount > 0);
     }
 
     /**
-     * @notice 获取玩家统计信息
-     * @param player 玩家地址
-     * @return stats 玩家统计信息
+     * @notice Get player statistics
+     * @param player Player address
+     * @return stats Player statistics
      */
     function getPlayerStats(address player) external view returns (PlayerStats memory) {
         uint256 gamesPlayed = 0;
         uint256 gamesWon = 0;
         uint256 totalWinnings = 0;
 
-        // 计算参与的游戏数量
+        // Calculate number of games participated in
         for (uint256 i = 0; i < gameCounter; i++) {
             if (hasPlayerSubmitted[i][player]) {
                 gamesPlayed++;
             }
         }
 
-        // 从获胜历史中计算获胜次数和总奖金
+        // Calculate win count and total winnings from winner history
         for (uint256 i = 0; i < winnerHistory.length; i++) {
             if (winnerHistory[i].winner == player) {
                 gamesWon++;
@@ -782,9 +782,9 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 获取获胜历史记录
-     * @param limit 限制返回数量，0表示返回全部
-     * @return records 获胜记录数组
+     * @notice Get winner history records
+     * @param limit Limit return count, 0 means return all
+     * @return records Winner records array
      */
     function getWinnerHistory(uint256 limit) external view returns (WinnerRecord[] memory) {
         uint256 historyLength = winnerHistory.length;
@@ -792,7 +792,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
         
         WinnerRecord[] memory records = new WinnerRecord[](returnLength);
         
-        // 返回最新的记录（倒序）
+        // Return latest records (reverse order)
         for (uint256 i = 0; i < returnLength; i++) {
             records[i] = winnerHistory[historyLength - 1 - i];
         }
@@ -801,26 +801,26 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
 
     /**
-     * @notice 获取获胜历史记录总数
-     * @return count 获胜记录总数
+     * @notice Get winner history records count
+     * @return count Winner records count
      */
     function getWinnerHistoryCount() external view returns (uint256) {
         return winnerHistory.length;
     }
 
     /**
-     * @notice 获取排行榜（按获胜次数排序的玩家列表）
-     * @param limit 返回的玩家数量限制
-     * @return topPlayers 排行榜玩家地址数组
-     * @return winCounts 对应的获胜次数数组
-     * @return totalWinnings 对应的总奖金数组
+     * @notice Get leaderboard (player list sorted by win count)
+     * @param limit Limit of returned players count
+     * @return topPlayers Leaderboard player addresses array
+     * @return winCounts Corresponding win counts array
+     * @return totalWinnings Corresponding total winnings array
      */
     function getLeaderboard(uint256 limit) external view returns (
         address[] memory topPlayers,
         uint256[] memory winCounts,
         uint256[] memory totalWinnings
     ) {
-        // 收集所有独特的获胜者
+        // Collect all unique winners
         address[] memory uniqueWinners = new address[](winnerHistory.length);
         uint256[] memory winnerCounts = new uint256[](winnerHistory.length);
         uint256[] memory winnerEarnings = new uint256[](winnerHistory.length);
@@ -831,7 +831,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             bool found = false;
             uint256 foundIndex = 0;
 
-            // 检查是否已经记录过这个获胜者
+            // Check if this winner has already been recorded
             for (uint256 j = 0; j < uniqueCount; j++) {
                 if (uniqueWinners[j] == winner) {
                     found = true;
@@ -851,18 +851,18 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             }
         }
 
-        // 确定返回数量
+        // Determine return count
         uint256 returnCount = (limit == 0 || limit > uniqueCount) ? uniqueCount : limit;
         
         topPlayers = new address[](returnCount);
         winCounts = new uint256[](returnCount);
         totalWinnings = new uint256[](returnCount);
 
-        // 简单的冒泡排序（按获胜次数降序）
+        // Simple bubble sort (descending order by win count)
         for (uint256 i = 0; i < uniqueCount; i++) {
             for (uint256 j = i + 1; j < uniqueCount; j++) {
                 if (winnerCounts[i] < winnerCounts[j]) {
-                    // 交换位置
+                    // Swap positions
                     address tempAddress = uniqueWinners[i];
                     uniqueWinners[i] = uniqueWinners[j];
                     uniqueWinners[j] = tempAddress;
@@ -878,7 +878,7 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
             }
         }
 
-        // 复制到返回数组
+        // Copy to return arrays
         for (uint256 i = 0; i < returnCount; i++) {
             topPlayers[i] = uniqueWinners[i];
             winCounts[i] = winnerCounts[i];
@@ -889,11 +889,11 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     }
     
     /**
-     * @notice 获取callback调试信息
-     * @param gameId 游戏ID
-     * @return isPending 是否正在等待解密
-     * @return requestId 最新请求ID
-     * @return lastError 最后一次错误信息
+     * @notice Get callback debug information
+     * @param gameId Game ID
+     * @return isPending Whether waiting for decryption
+     * @return requestId Latest request ID
+     * @return lastError Last error message
      */
     function getCallbackDebugInfo(uint256 gameId) external view returns (
         bool isPending,
