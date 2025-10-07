@@ -2,7 +2,7 @@ import { ethers } from "hardhat";
 import { UniqueNumberGameFactory__factory } from "../types";
 
 async function main() {
-  console.log("Starting UniqueNumberGameFactory deployment to Sepolia...");
+  console.log("Starting UniqueNmaumberGameFactory deployment to Sepolia...");
   
   // Get the deployer signer
   const [deployer] = await ethers.getSigners();
@@ -20,14 +20,11 @@ async function main() {
   console.log("\nDeploying UniqueNumberGameFactory contract...");
   const GameFactory = (await ethers.getContractFactory("UniqueNumberGameFactory")) as UniqueNumberGameFactory__factory;
   
-  // Use fixed high gas limit for FHE contracts
-  const gasLimit = BigInt(5000000); // 5M gas should be enough
-  console.log("Using gas limit:", gasLimit.toString());
-  
-  // Deploy with fixed gas limit
-  const gameFactory = await GameFactory.deploy({
-    gasLimit: gasLimit,
-  });
+  // Deploy without specifying gas limit - let ethers estimate
+  console.log("Estimating gas for deployment...");
+
+  // Deploy and let ethers handle gas estimation
+  const gameFactory = await GameFactory.deploy();
   
   console.log("Transaction hash:", gameFactory.deploymentTransaction()?.hash);
   console.log("Waiting for deployment confirmation...");

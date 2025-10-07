@@ -315,29 +315,18 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
     /**
      * @notice Handle decryption results of fixed 10 player submitted numbers
      * @param requestId Decryption request ID
-     * @param player0-player9 Decrypted player numbers (unused positions are 0)
-     * @param signatures Verification signatures
+     * @param decryptedResult Decrypted data in bytes format
+     * @param decryptionProof Decryption proof for verification
      */
     function callbackDecryptAllSubmissions(
         uint256 requestId,
-        uint32 player0,
-        uint32 player1,
-        uint32 player2,
-        uint32 player3,
-        uint32 player4,
-        uint32 player5,
-        uint32 player6,
-        uint32 player7,
-        uint32 player8,
-        uint32 player9,
-        bytes[] memory signatures
+        bytes memory decryptedResult,
+        bytes memory decryptionProof
     ) public {
         uint256 gameId = requestToGameId[requestId];
         emit CallbackAttempted(requestId, gameId);
-        
-        uint32[10] memory allNumbers = [player0, player1, player2, player3, player4, player5, player6, player7, player8, player9];
-        
-        try this._processDecryptedSubmissions(requestId, allNumbers, signatures) {
+
+        try this._processDecryptedSubmissions(requestId, decryptedResult, decryptionProof) {
             isDecryptionPending[gameId] = false;
             emit CallbackSucceeded(requestId, gameId);
         } catch Error(string memory reason) {
@@ -362,12 +351,15 @@ contract UniqueNumberGameFactory is SepoliaConfig, Ownable {
      */
     function _processDecryptedSubmissions(
         uint256 requestId,
-        uint32[10] memory allDecryptedNumbers,
-        bytes[] memory signatures
+        bytes memory decryptedResult,
+        bytes memory decryptionProof
     ) external {
-        
+
         // Verify signatures to prevent unauthorized decryption
-        FHE.checkSignatures(requestId, signatures);
+        FHE.checkSignatures(requestId, decryptedResult, decryptionProof);
+
+        // Decode the decrypted uint32 array from bytes
+        uint32[10] memory allDecryptedNumbers = abi.decode(decryptedResult, (uint32[10]));
         
         // Get corresponding game ID
         uint256 gameId = requestToGameId[requestId];

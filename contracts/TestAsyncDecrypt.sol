@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 pragma solidity ^0.8.24;
 
 import "@fhevm/solidity/lib/FHE.sol";
@@ -24,10 +25,17 @@ contract TestAsyncDecrypt is SepoliaConfig {
     isDecryptionPending = true;
   }
 
-  function myCustomCallback(uint256 requestId, bool decryptedInput, bytes[] memory signatures) public returns (bool) {
+  function myCustomCallback(
+    uint256 requestId,
+    bytes memory decryptedResult,
+    bytes memory decryptionProof
+  ) public returns (bool) {
     /// @dev This check is used to verify that the request id is the expected one.
     require(requestId == latestRequestId, "Invalid requestId");
-    FHE.checkSignatures(requestId, signatures);
+    FHE.checkSignatures(requestId, decryptedResult, decryptionProof);
+
+    // Decode the decrypted boolean from bytes
+    bool decryptedInput = abi.decode(decryptedResult, (bool));
     yBool = decryptedInput;
     isDecryptionPending = false;
     return yBool;
